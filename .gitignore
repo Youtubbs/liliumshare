@@ -1,0 +1,264 @@
+# Generic .gitignore by @Youtubbs on Github 
+
+################################################################################
+# CUSTOM (PUT CUSTOM .gitignore FILES HERE)
+################################################################################
+
+_userA_home/
+_userB_home/
+
+################################################################################
+# NODE & JAVASCRIPT
+################################################################################
+
+# Dependency directories
+node_modules/
+*/node_modules/
+
+# Build output
+dist/
+build/
+out/
+tmp/
+temp/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Lock files (if you don't want to commit them)
+# package-lock.json
+# yarn.lock
+
+# Coverage reports
+coverage/
+.nyc_output/
+
+################################################################################
+# PYTHON
+################################################################################
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+*/venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+pytest_cache/
+
+# PyInstaller
+# Usually these files are written by a python script from a template
+*.manifest
+*.spec
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Django stuff
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+
+# Flask stuff
+instance/
+.webassets-cache
+
+# Scrapy stuff
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+################################################################################
+# PERSONAL & USER DATA
+################################################################################
+
+# User-specific directories
+_userA_home/
+_userB_home/
+
+# Local environment configs
+.env
+.env.*
+.envrc
+*.local
+
+################################################################################
+# DOCKER
+################################################################################
+
+# Docker-related
+*.pid
+*.seed
+*.bak
+*.backup
+*.orig
+*.swp
+docker-compose.override.yml
+.docker/
+
+################################################################################
+# EDITOR / IDE FILES
+################################################################################
+
+# VSCode
+.vscode/
+.history/
+.code-workspace
+
+# JetBrains IDEs (PyCharm, WebStorm, IntelliJ, Rider, etc.)
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# Other editors
+*.swp
+*.swo
+*.kate-swp
+
+################################################################################
+# SYSTEM FILES
+################################################################################
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Linux
+*~
+.nfs*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+################################################################################
+# BACKUPS & TEMPORARY FILES
+################################################################################
+
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+*.old
+*.swp
+*.swo
+
+################################################################################
+# MISC
+################################################################################
+
+# Python virtual environment activation scripts
+activate
+activate.csh
+activate.fish
+
+# SQLite / database files
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+# Cache folders
+.cache/
+tmp/
+temp/
+
+# Other commonly ignored folders
+logs/
+log/
+dump/
+dumps/
+uploads/
+files/
+private/
+
+################################################################################
+# DOCKER VOLUMES & COMPOSE ARTIFACTS
+################################################################################
+
+# Ignore all Docker volume mounts
+*/data/
+*/volumes/
+*/db-data/
+*/db/
+*/redis/
+*/postgres/
+
+################################################################################
+# OPTIONAL: SECURITY
+################################################################################
+
+# Don't commit keys or secrets
+keys.py
+*.key
+*.pem
+*.crt
+*.cert
+*.p12
+*.pfx
+*.csr
+*.der
+*.gpg
+*.asc
+*.enc
+*.secret
+*.secrets
+*.password
+*.credentials

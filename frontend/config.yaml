@@ -1,0 +1,13 @@
+# LiliumShare default config (placeholder for future use)
+backend_base: "http://localhost:8080"
+ws_base: "ws://localhost:8080/ws"
+video:
+  fps: 20
+audio:
+  samplerate: 48000
+  channels: 1
+permissions:
+  keyboard: true
+  mouse: true
+  controller: false
+  immersion: false
