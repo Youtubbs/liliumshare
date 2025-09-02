@@ -1,85 +1,118 @@
-import asyncio, json, argparse, cv2
-from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaBlackhole
+import argparse, asyncio, json, os, sys, time
+import numpy as np
+
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, MediaStreamTrack
+from av import VideoFrame
+
+try:
+    from screen_capture import ScreenTrack  # now portal-first inside
+except Exception as e:
+    print("screen_capture import failed:", e)
+    raise
+
 from signaling import Signaling
-from screen_capture import ScreenTrack
-from audio_capture import MicrophoneTrack
-from input_inject import apply_event
 
-async def run_host(pubkey, ws_url):
-    sig = Signaling(ws_url, pubkey)
+KEYS_PATH = os.path.expanduser("~/.liliumshare/keys.json")
+
+def load_pubkey():
+    try:
+        with open(KEYS_PATH, "r") as f:
+            return json.load(f)["public"]
+    except Exception as e:
+        print("Could not read host pubkey at", KEYS_PATH, "error:", e)
+        sys.exit(1)
+
+class Dummy(MediaStreamTrack):
+    kind = "video"
+    def __init__(self): super().__init__()
+    async def recv(self): await asyncio.sleep(1/30.0); 
+
+async def run_host(ws_url: str, pubkey_override: str | None):
+    host_pubkey = pubkey_override or load_pubkey()
+
+    sig = Signaling(ws_url, host_pubkey)
     await sig.connect()
+    print("Connected as", host_pubkey)
 
-    # Permissions cache per viewer (populated by incoming-join)
-    permissions_map = {}
+    pc = RTCPeerConnection()
+    @pc.on("iceconnectionstatechange")
+    def _on_ice_state():
+        print("[host] ICE state:", pc.iceConnectionState)
+    @pc.on("connectionstatechange")
+    def _on_conn_state():
+        print("[host] PC state:", pc.connectionState)
 
-    pc = None
-    dc = None
+    # Add video track now
+    video = ScreenTrack(fps=20)
+    await video.start_capture()
+    if os.environ.get("XDG_SESSION_TYPE"):
+        print(f"[host/capture] session={os.environ.get('XDG_SESSION_TYPE')} desktop={os.environ.get('XDG_CURRENT_DESKTOP')}")
+    pc.addTrack(video)
 
-    async def on_message(msg):
-        nonlocal pc, dc
-        t = msg.get("type")
+    @pc.on("icecandidate")
+    def on_ice(candidate):
+        if candidate is None:
+            return
+        asyncio.create_task(sig.send({
+            "type": "ice",
+            "to": _current_viewer[0] or "",
+            "candidate": candidate.to_sdp(),
+            "sdpMid": candidate.sdpMid,
+            "sdpMLineIndex": candidate.sdpMLineIndex,
+        }))
 
-        if t == "incoming-join":
-            viewer = msg["viewer"]
-            perms = msg.get("permissions", {})
-            permissions_map[viewer] = perms
+    _current_viewer = [None]
 
-            # Auto-accept: host creates offer and sends to viewer
-            if pc is None or pc.connectionState in ("closed","failed"):
-                pc = RTCPeerConnection()
-                # Data channel for input events
-                dc = pc.createDataChannel("input")
-                # Screen + audio tracks
-                pc.addTrack(ScreenTrack())
-                pc.addTrack(MicrophoneTrack())
+    async def on_incoming(msg):
+        viewer = msg.get("viewer")
+        # Permissions cache per viewer (populated by incoming-join)
+        perms = msg.get("permissions", {})
+        _current_viewer[0] = viewer
+        print("[host] incoming-join from", viewer, "perms=", perms)
 
-                @dc.on("message")
-                def on_dc_message(data):
-                    try:
-                        evt = json.loads(data)
-                        apply_event(evt, permissions_map.get(viewer, {}))
-                    except Exception as e:
-                        print("input err:", e)
+        # Auto-accept: host creates offer and sends to viewer
+        await pc.setLocalDescription(await pc.createOffer())
+        await sig.send({"type": "offer", "to": viewer, "sdp": pc.localDescription.sdp})
+        print("[host] sent offer")
 
-                @pc.on("icecandidate")
-                async def on_ice(ev):
-                    if ev.candidate:
-                        await sig.send({"type":"ice","to":viewer,"candidate":ev.candidate.to_sdp(),"sdpMid":ev.candidate.sdp_mid,"sdpMLineIndex":ev.candidate.sdp_mline_index})
+    async def on_answer(msg):
+        sdp = msg.get("sdp")
+        if not sdp:
+            print("[host] answer missing sdp")
+            return
+        print("[host] got answer; applying")
+        await pc.setRemoteDescription(RTCSessionDescription(sdp, "answer"))
+        print("[host] set remote answer")
 
-            offer = await pc.createOffer()
-            await pc.setLocalDescription(offer)
-            await sig.send({"type":"offer","to":viewer,"sdp":pc.localDescription.sdp,"typeSdp":pc.localDescription.type})
-            print("Sent offer to viewer")
+    async def on_ice_from_viewer(msg):
+        cand = msg.get("candidate")
+        sdpMid = msg.get("sdpMid")
+        sdpMLineIndex = msg.get("sdpMLineIndex")
+        if cand is None:
+            return
+        try:
+            await pc.addIceCandidate(RTCIceCandidate(
+                sdpMid=sdpMid, sdpMLineIndex=sdpMLineIndex, candidate=cand))
+        except Exception as e:
+            print("[host] addIceCandidate error:", e)
 
-        elif t == "answer":
-            if pc:
-                await pc.setRemoteDescription(RTCSessionDescription(sdp=msg["sdp"], type=msg.get("typeSdp","answer")))
-                print("Set remote description (answer)")
+    sig.on("incoming-join", on_incoming)
+    sig.on("answer", on_answer)
+    sig.on("ice", on_ice_from_viewer)
+    sig.on("hello", lambda m: None)
 
-        elif t == "ice":
-            # Ignored in aiortc simple demo; ICE trickle can be handled with addIceCandidate if needed
-            pass
+    try:
+        await sig.loop()
+    finally:
+        await pc.close()
 
-        elif t == "hello":
-            print("Connected as", msg.get("you"))
-
-    sig.on("incoming-join", on_message)
-    sig.on("answer", on_message)
-    sig.on("ice", on_message)
-    sig.on("hello", on_message)
-
-    await sig.loop()
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ws", default="ws://localhost:8081/ws")
+    ap.add_argument("--pubkey", help="override host pubkey (base64)")
+    return ap.parse_args()
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--pubkey", help="Your public key (base64). If omitted, read from keys.json")
-    ap.add_argument("--ws", default="ws://localhost:8080/ws")
-    args = ap.parse_args()
+    args = parse_args()
+    asyncio.run(run_host(args.ws, args.pubkey))
 
-    if not args.pubkey:
-        import json, pathlib
-        data = json.loads((pathlib.Path.home()/".liliumshare/keys.json").read_text())
-        args.pubkey = data["public"]
-
-    asyncio.run(run_host(args.pubkey, args.ws))

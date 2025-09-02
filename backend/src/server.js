@@ -23,12 +23,27 @@ app.get('/api/debug/friendships', async (_, res) => {
   res.json(r.rows);
 });
 
+// connected WS clients
+let clients = new Map(); // pubkey -> ws
+app.get('/api/debug/clients', (_, res) => {
+  res.json({ clients: Array.from(clients.keys()) });
+});
+
+// simple lookup by nickname 
+app.get('/api/users/by-nickname', async (req, res) => {
+  const { nickname } = req.query || {};
+  if (!nickname) return res.status(400).json({ error: 'nickname required' });
+  const r = await pool.query('SELECT pubkey, nickname FROM users WHERE nickname=$1 LIMIT 1', [nickname]);
+  if (r.rowCount === 0) return res.status(404).json({ error: 'not found' });
+  res.json(r.rows[0]);
+});
+
 // register
 app.post('/api/register', async (req, res) => {
   const { pubkey, nickname } = req.body || {};
   if (!pubkey) return res.status(400).json({ error: 'pubkey required' });
   await pool.query(
-    'INSERT INTO users (pubkey, nickname) VALUES ($1, $2) ON CONFLICT (pubkey) DO UPDATE SET nickname=EXCLUDED.nickname',
+    'INSERT INTO users (pubkey, nickname) VALUES ($1,$2) ON CONFLICT (pubkey) DO UPDATE SET nickname=EXCLUDED.nickname',
     [pubkey, nickname || null]
   );
   res.json({ ok: true });
@@ -116,25 +131,48 @@ app.post('/api/friends/upsert', async (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-const clients = new Map();
-const send = (ws, obj) => { try { ws.send(JSON.stringify(obj)); } catch {} };
+const short = (s) => s ? s.slice(0,8) + '…' : '';
+
+const send = (ws, obj) => { try { ws.send(JSON.stringify(obj)); } catch (e) { console.error('ws send error', e); } };
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://x');
   const pubkey = url.searchParams.get('pubkey');
   if (!pubkey) { ws.close(1008, 'pubkey required'); return; }
+
+  ws.pubkey = pubkey;
   clients.set(pubkey, ws);
-  console.log('[ws] connected', pubkey.slice(0,8), '…');
-  ws.on('close', () => { clients.delete(pubkey); console.log('[ws] closed', pubkey.slice(0,8), '…'); });
+  console.log('[ws] connected', short(pubkey), '— clients:', clients.size);
+
+  ws.on('close', () => {
+    clients.delete(pubkey);
+    console.log('[ws] closed', short(pubkey), '— clients:', clients.size);
+  });
 
   ws.on('message', async (raw) => {
     let data; try { data = JSON.parse(raw.toString()); } catch { return; }
+
+    // Explicit routing logs
+    if (['offer', 'answer', 'ice', 'input-permissions'].includes(data.type)) {
+      const to = data.to;
+      const target = clients.get(to);
+      if (target) {
+        console.log(`[relay] ${data.type} ${short(ws.pubkey)} -> ${short(to)}`);
+        send(target, data);
+      } else {
+        console.log(`[relay-drop] ${data.type} to ${short(to)}: target not connected`);
+      }
+      return;
+    }
 
     if (data.type === 'join-request') {
       const { host, viewer } = data;
       console.log('[join-request]', { host, viewer });
       try {
-        const r = await pool.query('SELECT status, permissions FROM friendships WHERE host_pubkey=$1 AND friend_pubkey=$2', [host, viewer]);
+        const r = await pool.query(
+          'SELECT status, permissions FROM friendships WHERE host_pubkey=$1 AND friend_pubkey=$2',
+          [host, viewer]
+        );
         if (r.rowCount === 0) { console.log('[join-denied] not-friends (no row)'); send(ws, { type:'join-denied', reason:'not-friends' }); return; }
         const row = r.rows[0];
         if (row.status !== 'accepted') { console.log('[join-denied] not-friends (status=', row.status, ')'); send(ws, { type:'join-denied', reason:'not-friends' }); return; }
@@ -146,12 +184,6 @@ wss.on('connection', (ws, req) => {
       } catch (e) {
         console.error('[join-request ERROR]', e);
       }
-      return;
-    }
-
-    if (['offer', 'answer', 'ice', 'input-permissions'].includes(data.type)) {
-      const target = clients.get(data.to);
-      if (target) send(target, data);
       return;
     }
   });

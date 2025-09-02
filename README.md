@@ -2,16 +2,16 @@
 
 A minimal, local-first, Parsec-like screen sharing prototype with input permissions and audio passthrough.
 
-- **Backend:** Node.js (Express + WebSocket) + PostgreSQL  
-- **Frontend:** Python (aiortc) for host/viewer; screen capture (mss), input (pynput), audio (sounddevice)  
+- **Backend:** Node.js (Express + WebSocket) + PostgreSQL 
+- **Frontend:** Python (aiortc) for host/viewer; screen capture (mss), input (pynput), audio (sounddevice) 
 - **Identity / friending:** Users are identified by **Ed25519 public keys** (base64). Friendship is host→viewer with an `accepted` status and per-viewer permissions (auto-join, keyboard, mouse, controller, immersion).
 
 ---
 
 ## Architecture
 
-- **Postgres**: stores `users` and `friendships (host_pubkey, friend_pubkey, status, permissions)`  
-- **Node backend**: REST for registration/friending/permissions + **WebSocket signaling** at `/ws`  
+- **Postgres**: stores `users` and `friendships (host_pubkey, friend_pubkey, status, permissions)` 
+- **Node backend**: REST for registration/friending/permissions + **WebSocket signaling** at `/ws` 
 - **Python host/viewer**: set up WebRTC; host captures screen+audio, viewer renders stream
 
 > Default backend port (host): **8081** → REST `http://localhost:8081`, WS `ws://localhost:8081/ws`.
@@ -48,7 +48,7 @@ pip install -r frontend/requirements.txt
 
 ```bash 
 python scripts/bootstrap_local_dual_user.py \
-  --base http://localhost:8081 \
+  --base http://localhost:8080 \
   --ahome "$(pwd)/_userA_home" \
   --bhome "$(pwd)/_userB_home"
 ```
@@ -58,6 +58,14 @@ The script:
 - upserts friendship (accepted) and permissions (autoJoin + kb/mouse),
 - prints A_PUB (host pubkey) and the exact commands to run host & viewer.
 Re-running the script reuses the same keys; pass --force-new-keys if you intentionally want fresh identities (then restart the clients).
+
+Note that you may have to change 8080 to 8081 in the resulting run commands outputted by the python script. More troubleshooting required to understand why.
+
+```bash
+docker compose logs -f backend
+```
+
+Don't forget to start up logging for your server.
 
 ### 4) Connecting two users
 ```bash 

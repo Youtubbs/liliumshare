@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse, base64, json, os, pathlib, sys
 import requests
 from nacl import signing
@@ -11,21 +12,17 @@ from nacl import signing
 def b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
-def load_or_create(home_dir: pathlib.Path, nickname: str) -> str:
+def ensure_keys(home_dir: pathlib.Path, nickname: str) -> dict:
     cfg = home_dir / ".liliumshare"
     cfg.mkdir(parents=True, exist_ok=True)
     kf = cfg / "keys.json"
     if kf.exists():
-        data = json.loads(kf.read_text())
-        if not data.get("nickname"):
-            data["nickname"] = nickname
-            kf.write_text(json.dumps(data, indent=2))
-        return data["public"]
+        return json.loads(kf.read_text())
     sk = signing.SigningKey.generate()
     vk = sk.verify_key
     data = {"private": b64(sk.encode()), "public": b64(vk.encode()), "nickname": nickname}
     kf.write_text(json.dumps(data, indent=2))
-    return data["public"]
+    return data
 
 def post(base: str, path: str, payload: dict) -> dict:
     r = requests.post(f"{base}{path}", json=payload, timeout=10)
@@ -36,7 +33,7 @@ def post(base: str, path: str, payload: dict) -> dict:
     return body
 
 def get_params(base: str, path: str, params: dict) -> dict:
-    r = requests.get(f"{base}{path}", params=params, timeout=10)  # <-- encodes + and /
+    r = requests.get(f"{base}{path}", params=params, timeout=10)
     try: body = r.json()
     except Exception: body = r.text
     if not (200 <= r.status_code < 300):
@@ -44,44 +41,59 @@ def get_params(base: str, path: str, params: dict) -> dict:
     return body
 
 def main():
-    ap = argparse.ArgumentParser(description="Create or reuse two local users and wire friendship/permissions.")
-    ap.add_argument("--base", default="http://localhost:8081", help="Backend base URL")
-    ap.add_argument("--ahome", default=str(pathlib.Path.cwd() / "_userA_home"), help="Host A HOME dir")
-    ap.add_argument("--bhome", default=str(pathlib.Path.cwd() / "_userB_home"), help="Viewer B HOME dir")
-    ap.add_argument("--force-new-keys", action="store_true", help="Overwrite keys.json in both homes")
+    ap = argparse.ArgumentParser(description="Create two users, register, friend, set permissions, and print run commands.")
+    ap.add_argument("--base", default="http://localhost:8081", help="Backend base URL (http)")
+    ap.add_argument("--write-homes", action="store_true", help="Also write ~/.liliumshare/keys.json under the two HOME dirs")
+    ap.add_argument("--ahome", default=str(pathlib.Path.cwd() / "_userA_home"), help="Host A HOME dir (only if --write-homes)")
+    ap.add_argument("--bhome", default=str(pathlib.Path.cwd() / "_userB_home"), help="Viewer B HOME dir (only if --write-homes)")
+    ap.add_argument("--anick", default="HostA", help="Nickname for A")
+    ap.add_argument("--bnick", default="ViewerB", help="Nickname for B")
     args = ap.parse_args()
 
     base = args.base.rstrip("/")
-    A_HOME = pathlib.Path(args.ahome).resolve()
-    B_HOME = pathlib.Path(args.bhome).resolve()
+    ws = base.replace("http://","ws://").replace("https://","wss://") + "/ws"
 
-    if args.force_new_keys:
-        for h in (A_HOME, B_HOME):
-            kf = h / ".liliumshare" / "keys.json"
-            try: kf.unlink()
-            except FileNotFoundError: pass
+    # Generate in-memory keys; optionally write to homes
+    skA = signing.SigningKey.generate(); vkA = skA.verify_key
+    skB = signing.SigningKey.generate(); vkB = skB.verify_key
+    A_PUB = b64(vkA.encode()); B_PUB = b64(vkB.encode())
 
-    print("Ensuring keys exist...")
-    A_PUB = load_or_create(A_HOME, "HostA")
-    B_PUB = load_or_create(B_HOME, "ViewerB")
+    if args.write_homes:  # <-- FIXED (underscore)
+        A_HOME = pathlib.Path(args.ahome).resolve()
+        B_HOME = pathlib.Path(args.bhome).resolve()
+        a = {"private": b64(skA.encode()), "public": A_PUB, "nickname": args.anick}
+        b = {"private": b64(skB.encode()), "public": B_PUB, "nickname": args.bnick}
+        (A_HOME / ".liliumshare").mkdir(parents=True, exist_ok=True)
+        (B_HOME / ".liliumshare").mkdir(parents=True, exist_ok=True)
+        (A_HOME / ".liliumshare" / "keys.json").write_text(json.dumps(a, indent=2))
+        (B_HOME / ".liliumshare" / "keys.json").write_text(json.dumps(b, indent=2))
 
-    print("\nRegistering users on", base)
-    post(base, "/api/register", {"pubkey": A_PUB, "nickname": "HostA"})
-    post(base, "/api/register", {"pubkey": B_PUB, "nickname": "ViewerB"})
+    # Register
+    post(base, "/api/register", {"pubkey": A_PUB, "nickname": args.anick})
+    post(base, "/api/register", {"pubkey": B_PUB, "nickname": args.bnick})
 
-    print("\nUpserting friendship + permissions")
+    # Upsert friendship + permissions
     perms = {"autoJoin": True, "keyboard": True, "mouse": True, "controller": False, "immersion": False}
     post(base, "/api/friends/upsert", {"host": A_PUB, "friend": B_PUB, "permissions": perms})
 
+    # Verify
     ver = get_params(base, "/api/friends/permissions", {"host": A_PUB, "friend": B_PUB})
-    print("\n=== OK (same keys reused every run) ===")
-    print("A_HOME:", A_HOME); print("B_HOME:", B_HOME)
-    print("A_PUB:", A_PUB);    print("B_PUB:", B_PUB)
-    print("Verify:", ver)
-    ws = base.replace("http://","ws://").replace("https://","wss://") + "/ws"
-    print("\nRun in two terminals:")
-    print(f'  HOME="{A_HOME}" python frontend/client.py host --ws {ws}')
-    print(f'  HOME="{B_HOME}" python frontend/client.py view --host "{A_PUB}" --ws {ws}')
+
+    print("\n=== LiliumShare Local Bootstrap OK ===")
+    print("Backend:", base)
+    print("WS:", ws)
+    print("Host (A) pubkey:", A_PUB)
+    print("Viewer (B) pubkey:", B_PUB)
+    print("Permissions:", json.dumps(ver, indent=2))
+
+    print("\nRun in two terminals (no HOME needed):")
+    print(f'  python frontend/client.py host  --ws {ws} --pubkey "{A_PUB}"')
+    print(f'  python frontend/client.py view  --ws {ws} --host "{A_PUB}" --pubkey "{B_PUB}"')
+
+    if args.write_homes:  # <-- FIXED (underscore)
+        print("\nOr, using HOME-based keys (created now):")
+        print(f'  HOME="{A_HOME}" python frontend/client.py host  --ws {ws}')
+        print(f'  HOME="{B_HOME}" python frontend/client.py view  --ws {ws} --host "{A_PUB}"')
 
 if __name__ == "__main__":
     try:
@@ -90,3 +102,4 @@ if __name__ == "__main__":
     except Exception:
         print("You need: pip install requests PyNaCl", file=sys.stderr); sys.exit(2)
     main()
+
