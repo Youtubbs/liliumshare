@@ -13,3 +13,4 @@ pygame>=2.6.1
 blosc2>=2.3.0
 numpy<1.28.0,>=1.21.6
 dbus-next>=0.2.3
+cryptography>=42.0.0

@@ -1,6 +1,7 @@
 import argparse, json, os, sys, pathlib, threading, queue, asyncio, time
 import numpy as np
 import cv2  # for JPEG decode
+from typing import Optional
 from urllib.parse import urlparse, urlunparse, urlencode
 from urllib.request import urlopen
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
@@ -269,7 +270,7 @@ def _pygame_gui_loop(app: ViewerApp):
         except Exception:
             pass
 
-def run_viewer(host_pubkey: str, ws_url: str, pubkey_cli: str | None):
+def run_viewer(host_pubkey: str, ws_url: str, pubkey_cli: Optional[str]):
     viewer_pubkey = load_pubkey_flexible(ws_url, pubkey_cli)
     print("[viewer] my pubkey:", viewer_pubkey, flush=True)
 
@@ -290,10 +291,9 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", required=True, help="Host public key")
     ap.add_argument("--ws", default="ws://localhost:8081/ws")
-    ap.add_argument("--pubkey", help="Override identity (base64 Ed25519 public key)")
+    ap.add_argument("--pubkey", help="Override identity (base64 RSA public key)")
     return ap.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
     run_viewer(args.host, args.ws, args.pubkey)
-

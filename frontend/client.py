@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import sys
+from typing import Optional
 
 # Import the actual runners
 # (These modules handle the flexible identity resolution for "your" pubkey.)
@@ -69,4 +70,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

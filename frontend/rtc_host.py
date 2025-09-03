@@ -1,11 +1,10 @@
-import argparse, asyncio, json, os, sys, time
-import numpy as np
+import argparse, asyncio, json, os, sys
+from typing import Optional
 
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, MediaStreamTrack
-from av import VideoFrame
 
 try:
-    from screen_capture import ScreenTrack  # now portal-first inside
+    from screen_capture import ScreenTrack
 except Exception as e:
     print("screen_capture import failed:", e)
     raise
@@ -25,9 +24,9 @@ def load_pubkey():
 class Dummy(MediaStreamTrack):
     kind = "video"
     def __init__(self): super().__init__()
-    async def recv(self): await asyncio.sleep(1/30.0); 
+    async def recv(self): await asyncio.sleep(1/30.0)
 
-async def run_host(ws_url: str, pubkey_override: str | None):
+async def run_host(ws_url: str, pubkey_override: Optional[str]):
     host_pubkey = pubkey_override or load_pubkey()
 
     sig = Signaling(ws_url, host_pubkey)
@@ -49,6 +48,8 @@ async def run_host(ws_url: str, pubkey_override: str | None):
         print(f"[host/capture] session={os.environ.get('XDG_SESSION_TYPE')} desktop={os.environ.get('XDG_CURRENT_DESKTOP')}")
     pc.addTrack(video)
 
+    _current_viewer = [None]
+
     @pc.on("icecandidate")
     def on_ice(candidate):
         if candidate is None:
@@ -60,8 +61,6 @@ async def run_host(ws_url: str, pubkey_override: str | None):
             "sdpMid": candidate.sdpMid,
             "sdpMLineIndex": candidate.sdpMLineIndex,
         }))
-
-    _current_viewer = [None]
 
     async def on_incoming(msg):
         viewer = msg.get("viewer")
@@ -115,4 +114,4 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     asyncio.run(run_host(args.ws, args.pubkey))
-
+    

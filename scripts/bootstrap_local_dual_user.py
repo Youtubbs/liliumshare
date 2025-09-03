@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 import argparse, base64, json, os, pathlib, sys
 import requests
-from nacl import signing
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization
 
 # Example usage: 
 # python3 scripts/bootstrap_local_dual_user.py \
@@ -12,15 +13,24 @@ from nacl import signing
 def b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
+def gen_rsa():
+    sk = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pub_der = sk.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    prv_der = sk.private_bytes(
+        serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
+    return b64(prv_der), b64(pub_der)
+
 def ensure_keys(home_dir: pathlib.Path, nickname: str) -> dict:
     cfg = home_dir / ".liliumshare"
     cfg.mkdir(parents=True, exist_ok=True)
     kf = cfg / "keys.json"
     if kf.exists():
         return json.loads(kf.read_text())
-    sk = signing.SigningKey.generate()
-    vk = sk.verify_key
-    data = {"private": b64(sk.encode()), "public": b64(vk.encode()), "nickname": nickname}
+    prv, pub = gen_rsa()
+    data = {"private": prv, "public": pub, "nickname": nickname}
     kf.write_text(json.dumps(data, indent=2))
     return data
 
@@ -54,15 +64,14 @@ def main():
     ws = base.replace("http://","ws://").replace("https://","wss://") + "/ws"
 
     # Generate in-memory keys; optionally write to homes
-    skA = signing.SigningKey.generate(); vkA = skA.verify_key
-    skB = signing.SigningKey.generate(); vkB = skB.verify_key
-    A_PUB = b64(vkA.encode()); B_PUB = b64(vkB.encode())
+    prvA, A_PUB = gen_rsa()
+    prvB, B_PUB = gen_rsa()
 
-    if args.write_homes:  # <-- FIXED (underscore)
+    if args.write_homes:  
         A_HOME = pathlib.Path(args.ahome).resolve()
         B_HOME = pathlib.Path(args.bhome).resolve()
-        a = {"private": b64(skA.encode()), "public": A_PUB, "nickname": args.anick}
-        b = {"private": b64(skB.encode()), "public": B_PUB, "nickname": args.bnick}
+        a = {"private": prvA, "public": A_PUB, "nickname": args.anick}
+        b = {"private": prvB, "public": B_PUB, "nickname": args.bnick}
         (A_HOME / ".liliumshare").mkdir(parents=True, exist_ok=True)
         (B_HOME / ".liliumshare").mkdir(parents=True, exist_ok=True)
         (A_HOME / ".liliumshare" / "keys.json").write_text(json.dumps(a, indent=2))
@@ -76,21 +85,24 @@ def main():
     perms = {"autoJoin": True, "keyboard": True, "mouse": True, "controller": False, "immersion": False}
     post(base, "/api/friends/upsert", {"host": A_PUB, "friend": B_PUB, "permissions": perms})
 
+    # Generate per-friendship connection keys
+    post(base, "/api/friends/connkey/generate", {"host": A_PUB, "friend": B_PUB})
+
     # Verify
     ver = get_params(base, "/api/friends/permissions", {"host": A_PUB, "friend": B_PUB})
 
-    print("\n=== LiliumShare Local Bootstrap OK ===")
+    print("\n=== LiliumShare Local Bootstrap OK (RSA) ===")
     print("Backend:", base)
     print("WS:", ws)
     print("Host (A) pubkey:", A_PUB)
     print("Viewer (B) pubkey:", B_PUB)
-    print("Permissions:", json.dumps(ver, indent=2))
+    print("Permissions+ConnKeys:", json.dumps(ver, indent=2))
 
     print("\nRun in two terminals (no HOME needed):")
     print(f'  python frontend/client.py host  --ws {ws} --pubkey "{A_PUB}"')
     print(f'  python frontend/client.py view  --ws {ws} --host "{A_PUB}" --pubkey "{B_PUB}"')
 
-    if args.write_homes:  # <-- FIXED (underscore)
+    if args.write_homes:  
         print("\nOr, using HOME-based keys (created now):")
         print(f'  HOME="{A_HOME}" python frontend/client.py host  --ws {ws}')
         print(f'  HOME="{B_HOME}" python frontend/client.py view  --ws {ws} --host "{A_PUB}"')
@@ -98,8 +110,7 @@ def main():
 if __name__ == "__main__":
     try:
         import requests  # noqa
-        from nacl import signing  # noqa
+        from cryptography.hazmat.primitives.asymmetric import rsa  # noqa
     except Exception:
-        print("You need: pip install requests PyNaCl", file=sys.stderr); sys.exit(2)
+        print("You need: pip install requests cryptography", file=sys.stderr); sys.exit(2)
     main()
-

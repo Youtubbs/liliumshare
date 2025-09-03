@@ -19,6 +19,16 @@ CREATE TABLE IF NOT EXISTS friendships (
   FOREIGN KEY (host_pubkey) REFERENCES users(pubkey) ON DELETE CASCADE,
   FOREIGN KEY (friend_pubkey) REFERENCES users(pubkey) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS connkeys (
+  host_pubkey   TEXT NOT NULL,
+  friend_pubkey TEXT NOT NULL,
+  conn_key      TEXT NOT NULL,
+  created_at    TIMESTAMP DEFAULT now(),
+  PRIMARY KEY (host_pubkey, friend_pubkey),
+  FOREIGN KEY (host_pubkey) REFERENCES users(pubkey) ON DELETE CASCADE,
+  FOREIGN KEY (friend_pubkey) REFERENCES users(pubkey) ON DELETE CASCADE
+);
 `;
 
 (async () => {

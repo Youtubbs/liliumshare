@@ -4,6 +4,7 @@ import bodyParser from 'body-parser';
 import { pool } from './db.js';
 import { WebSocketServer } from 'ws';
 import http from 'http';
+import crypto from 'crypto';
 import 'dotenv/config';
 
 const app = express();
@@ -19,7 +20,7 @@ app.get('/api/debug/users', async (_, res) => {
   res.json(r.rows);
 });
 app.get('/api/debug/friendships', async (_, res) => {
-  const r = await pool.query('SELECT host_pubkey, friend_pubkey, status, permissions, created_at FROM friendships ORDER BY created_at DESC');
+  const r = await pool.query('SELECT host_pubkey, friend_pubkey, status, permissions, connection_key_host, connection_key_friend, created_at FROM friendships ORDER BY created_at DESC');
   res.json(r.rows);
 });
 
@@ -29,7 +30,7 @@ app.get('/api/debug/clients', (_, res) => {
   res.json({ clients: Array.from(clients.keys()) });
 });
 
-// simple lookup by nickname 
+// simple lookup by nickname
 app.get('/api/users/by-nickname', async (req, res) => {
   const { nickname } = req.query || {};
   if (!nickname) return res.status(400).json({ error: 'nickname required' });
@@ -84,7 +85,7 @@ app.post('/api/friends/permissions', async (req, res) => {
   res.json({ ok: true });
 });
 
-// get permissions (accept both querystring and JSON body; handles +, / safely)
+// get permissions (query or body)
 app.all('/api/friends/permissions', async (req, res) => {
   const q = req.query || {};
   const b = (req.body && typeof req.body === 'object') ? req.body : {};
@@ -96,7 +97,7 @@ app.all('/api/friends/permissions', async (req, res) => {
   res.json(r.rows[0]);
 });
 
-// one-shot upsert (makes row (host, friend) = accepted w/ perms, and (friend, host) accepted)
+// one-shot upsert
 app.post('/api/friends/upsert', async (req, res) => {
   const { host, friend, permissions } = req.body || {};
   if (!host || !friend) return res.status(400).json({ error: 'host and friend required' });
@@ -127,12 +128,90 @@ app.post('/api/friends/upsert', async (req, res) => {
   }
 });
 
+// ---- per-friendship connection keys ----
+
+// generate a (host,friend) connection key
+app.post('/api/friends/connkey/generate', async (req, res) => {
+  const { host, friend } = req.body || {};
+  if (!host || !friend) return res.status(400).json({ error: 'host and friend required' });
+  // ensure friendship exists & accepted (optional guard)
+  const r = await pool.query('SELECT status FROM friendships WHERE host_pubkey=$1 AND friend_pubkey=$2', [host, friend]);
+  if (r.rowCount === 0 || r.rows[0].status !== 'accepted') {
+    return res.status(409).json({ error: 'friendship not accepted' });
+  }
+  const key = crypto.randomBytes(32).toString('base64');
+  await pool.query(
+    `INSERT INTO connkeys (host_pubkey, friend_pubkey, conn_key)
+     VALUES ($1,$2,$3)
+     ON CONFLICT (host_pubkey, friend_pubkey) DO UPDATE SET conn_key=EXCLUDED.conn_key, created_at=now()`,
+    [host, friend, key]
+  );
+  res.json({ ok: true, conn_key: key });
+});
+
+// fetch the (host,friend) connection key
+app.all('/api/friends/connkey', async (req, res) => {
+  const q = req.query || {};
+  const b = (req.body && typeof req.body === 'object') ? req.body : {};
+  const host = (q.host || b.host || '').toString();
+  const friend = (q.friend || b.friend || '').toString();
+  if (!host || !friend) return res.status(400).json({ error: 'host and friend required' });
+  const r = await pool.query('SELECT conn_key, created_at FROM connkeys WHERE host_pubkey=$1 AND friend_pubkey=$2', [host, friend]);
+  if (r.rowCount === 0) return res.status(404).json({ error: 'not found' });
+  res.json(r.rows[0]);
+});
+
+// List friends + pending requests for one user
+app.get('/api/friends/list', async (req, res) => {
+  const me = (req.query.me || '').toString();
+  if (!me) return res.status(400).json({ error: 'me required' });
+
+  try {
+    // Incoming "pending" → people who asked ME (viewer=their_pub, host=me)
+    const incoming = await pool.query(
+      `SELECT f.friend_pubkey AS viewer_pubkey, u.nickname, f.created_at
+       FROM friendships f
+       JOIN users u ON u.pubkey = f.friend_pubkey
+       WHERE f.host_pubkey=$1 AND f.status='pending'
+       ORDER BY f.created_at DESC`, [me]);
+
+    // Outgoing "pending" → requests I sent (I am friend_pubkey in the pending row)
+    const outgoing = await pool.query(
+      `SELECT f.host_pubkey AS host_pubkey, u.nickname, f.created_at
+       FROM friendships f
+       JOIN users u ON u.pubkey = f.host_pubkey
+       WHERE f.friend_pubkey=$1 AND f.status='pending'
+       ORDER BY f.created_at DESC`, [me]);
+
+    // Accepted — union both directions, de-duped
+    const accepted = await pool.query(
+      `WITH rel AS (
+         SELECT friend_pubkey AS other FROM friendships WHERE host_pubkey=$1 AND status='accepted'
+         UNION
+         SELECT host_pubkey   AS other FROM friendships WHERE friend_pubkey=$1 AND status='accepted'
+       )
+       SELECT r.other AS pubkey, u.nickname
+       FROM rel r
+       JOIN users u ON u.pubkey = r.other
+       GROUP BY r.other, u.nickname
+       ORDER BY u.nickname NULLS LAST, r.other`, [me]);
+
+    res.json({
+      incoming: incoming.rows,
+      outgoing: outgoing.rows,
+      accepted: accepted.rows
+    });
+  } catch (e) {
+    console.error('[friends/list ERROR]', e);
+    res.status(500).json({ error: 'db error' });
+  }
+});
+
 // ---- WS signaling ----
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 const short = (s) => s ? s.slice(0,8) + '…' : '';
-
 const send = (ws, obj) => { try { ws.send(JSON.stringify(obj)); } catch (e) { console.error('ws send error', e); } };
 
 wss.on('connection', (ws, req) => {
@@ -152,7 +231,6 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async (raw) => {
     let data; try { data = JSON.parse(raw.toString()); } catch { return; }
 
-    // Explicit routing logs
     if (['offer', 'answer', 'ice', 'input-permissions'].includes(data.type)) {
       const to = data.to;
       const target = clients.get(to);
@@ -193,4 +271,3 @@ wss.on('connection', (ws, req) => {
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => console.log('Backend listening on', PORT));
-
