@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Portal-first capture for Wayland (GNOME). Falls back to synthetic pattern.
 
 import asyncio, time, os
@@ -18,7 +19,16 @@ class ScreenTrack(MediaStreamTrack):
         self._portal: PortalGrabber | None = None
 
     async def start_capture(self):
-        if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
+        mode = os.environ.get("LILIUM_VIDEO_MODE", "").lower()
+        if mode == "camera" and cv2 is not None:
+            self._mode = "camera"
+            cam_idx = int(os.environ.get("LILIUM_CAMERA_INDEX","0"))
+            self._cam = cv2.VideoCapture(cam_idx, cv2.CAP_ANY)
+            if not self._cam or not self._cam.isOpened():
+                print("[host/capture] camera open failed; falling back to portal/synthetic")
+                self._mode = "synthetic"
+        elif os.environ.get("XDG_SESSION_TYPE","").lower()=="wayland" and mode != "synthetic":
+            # your existing portal branch…
             try:
                 self._portal = PortalGrabber()
                 await self._portal.open()
@@ -45,15 +55,13 @@ class ScreenTrack(MediaStreamTrack):
 
     async def recv(self):
         await asyncio.sleep(self.dt)
-        if self._mode == "portal" and self._portal is not None:
-            try:
-                bgr = self._portal.grab_bgr()
-                if bgr is not None:
-                    frame = VideoFrame.from_ndarray(bgr, format="bgr24")
-                    frame.pts, frame.time_base = self.next_timestamp()
-                    return frame
-            except Exception as e:
-                print("[host/capture] portal grab error; switching to synthetic:", e)
+        if self._mode == "camera" and cv2 is not None and getattr(self, "_cam", None):
+            ok, frame = self._cam.read()
+            if ok:
+                bgr = frame
+                vf = VideoFrame.from_ndarray(bgr, format="bgr24")
+                vf.pts, vf.time_base = self.next_timestamp(); return vf
+            else:
                 self._mode = "synthetic"
         bgr = self._synthetic()
         frame = VideoFrame.from_ndarray(bgr, format="bgr24")

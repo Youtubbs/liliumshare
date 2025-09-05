@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16
+    image: postgres:15
     environment:
       POSTGRES_USER: lilium
       POSTGRES_PASSWORD: lilium
@@ -8,25 +8,34 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - dbdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lilium -d liliumshare"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      - pgdata:/var/lib/postgresql/data
+
+  migrate:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgres://lilium:lilium@db:5432/liliumshare
+      LILIUM_NETCFG: /app/network_config.json
+    depends_on:
+      - db
+    volumes:
+      - ./backend/network_config.json:/app/network_config.json:ro
+    entrypoint: ["npm", "run", "migrate"]
 
   backend:
     build: ./backend
     environment:
       DATABASE_URL: postgres://lilium:lilium@db:5432/liliumshare
       PORT: 8080
-    ports:
-      - "8081:8080"   # 8081 on host 8080 otherwise
-    command: sh -c "node src/migrate.js && node src/server.js"
+      LILIUM_NETCFG: /app/network_config.json
     depends_on:
-      db:
-        condition: service_healthy
+      - db
+      - migrate
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./backend/network_config.json:/app/network_config.json:ro
+    command: ["npm","run","start"]
 
 volumes:
-  dbdata:
+  pgdata: {}
 

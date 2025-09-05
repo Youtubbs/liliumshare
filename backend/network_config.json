@@ -1,0 +1,11 @@
+{
+  "backend": {
+    "http_base": "http://localhost:18080",
+    "ws_base": "ws://localhost:18080/ws",
+    "port": 8080
+  },
+  "database": {
+    "url": "postgres://lilium:lilium@db:5432/liliumshare"
+  }
+}
+

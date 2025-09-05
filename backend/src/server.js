@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
@@ -6,6 +9,21 @@ import { WebSocketServer } from 'ws';
 import http from 'http';
 import crypto from 'crypto';
 import 'dotenv/config';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const cfgPath =
+  process.env.LILIUM_NETCFG ||
+  path.resolve(process.cwd(), 'network_config.json') ||
+  path.resolve(__dirname, '../network_config.json');
+
+let NETCFG = {};
+try {
+  NETCFG = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+} catch {
+  NETCFG = {};
+}
 
 const app = express();
 app.use(cors());
@@ -161,52 +179,72 @@ app.all('/api/friends/connkey', async (req, res) => {
   res.json(r.rows[0]);
 });
 
-// List friends + pending requests for one user
+// list friends and requests for "me" (includes nickname for "other")
 app.get('/api/friends/list', async (req, res) => {
   const me = (req.query.me || '').toString();
   if (!me) return res.status(400).json({ error: 'me required' });
 
   try {
-    // Incoming "pending" → people who asked ME (viewer=their_pub, host=me)
-    const incoming = await pool.query(
-      `SELECT f.friend_pubkey AS viewer_pubkey, u.nickname, f.created_at
-       FROM friendships f
-       JOIN users u ON u.pubkey = f.friend_pubkey
-       WHERE f.host_pubkey=$1 AND f.status='pending'
-       ORDER BY f.created_at DESC`, [me]);
+    // incoming pending (requests TO me): other = friend_pubkey
+    const inc = await pool.query(
+      `SELECT f.friend_pubkey AS other,
+              COALESCE(u.nickname, '') AS nickname,
+              f.status, f.permissions, f.created_at
+         FROM friendships f
+    LEFT JOIN users u ON u.pubkey = f.friend_pubkey
+        WHERE f.host_pubkey = $1 AND f.status = 'pending'
+        ORDER BY f.created_at DESC`,
+      [me]
+    );
 
-    // Outgoing "pending" → requests I sent (I am friend_pubkey in the pending row)
-    const outgoing = await pool.query(
-      `SELECT f.host_pubkey AS host_pubkey, u.nickname, f.created_at
-       FROM friendships f
-       JOIN users u ON u.pubkey = f.host_pubkey
-       WHERE f.friend_pubkey=$1 AND f.status='pending'
-       ORDER BY f.created_at DESC`, [me]);
+    // outgoing pending (requests I SENT): other = host_pubkey
+    const out = await pool.query(
+      `SELECT f.host_pubkey AS other,
+              COALESCE(u.nickname, '') AS nickname,
+              f.status, f.permissions, f.created_at
+         FROM friendships f
+    LEFT JOIN users u ON u.pubkey = f.host_pubkey
+        WHERE f.friend_pubkey = $1 AND f.status = 'pending'
+        ORDER BY f.created_at DESC`,
+      [me]
+    );
 
-    // Accepted — union both directions, de-duped
-    const accepted = await pool.query(
-      `WITH rel AS (
-         SELECT friend_pubkey AS other FROM friendships WHERE host_pubkey=$1 AND status='accepted'
-         UNION
-         SELECT host_pubkey   AS other FROM friendships WHERE friend_pubkey=$1 AND status='accepted'
-       )
-       SELECT r.other AS pubkey, u.nickname
-       FROM rel r
-       JOIN users u ON u.pubkey = r.other
-       GROUP BY r.other, u.nickname
-       ORDER BY u.nickname NULLS LAST, r.other`, [me]);
+    // accepted both directions → collapse to unique "other"
+    const acc = await pool.query(
+      `SELECT f.host_pubkey, f.friend_pubkey, f.permissions, f.created_at
+         FROM friendships f
+        WHERE (f.host_pubkey=$1 OR f.friend_pubkey=$1) AND f.status='accepted'
+        ORDER BY f.created_at DESC`,
+      [me]
+    );
+
+    const seen = new Set();
+    const friends = [];
+    for (const row of acc.rows) {
+      const other = (row.host_pubkey === me) ? row.friend_pubkey : row.host_pubkey;
+      if (seen.has(other)) continue;
+      seen.add(other);
+      // nickname for other
+      const rr = await pool.query('SELECT COALESCE(nickname, \'\') AS nickname FROM users WHERE pubkey=$1 LIMIT 1', [other]);
+      friends.push({
+        other,
+        nickname: rr.rowCount ? rr.rows[0].nickname : '',
+        status: 'accepted',
+        permissions: row.permissions || {},
+        created_at: row.created_at
+      });
+    }
 
     res.json({
-      incoming: incoming.rows,
-      outgoing: outgoing.rows,
-      accepted: accepted.rows
+      incoming: inc.rows.map(r => ({ other: r.other, nickname: r.nickname, status: r.status, permissions: r.permissions || {}, created_at: r.created_at })),
+      outgoing: out.rows.map(r => ({ other: r.other, nickname: r.nickname, status: r.status, permissions: r.permissions || {}, created_at: r.created_at })),
+      friends
     });
   } catch (e) {
     console.error('[friends/list ERROR]', e);
     res.status(500).json({ error: 'db error' });
   }
 });
-
 // ---- WS signaling ----
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -269,5 +307,5 @@ wss.on('connection', (ws, req) => {
   send(ws, { type: 'hello', you: pubkey });
 });
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || (NETCFG.backend && NETCFG.backend.port) || 8080;
 server.listen(PORT, () => console.log('Backend listening on', PORT));

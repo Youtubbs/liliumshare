@@ -29,20 +29,20 @@ class Signaling:
         self.handlers[mtype] = cb
 
     async def loop(self):
-        async for message in self.ws:
-            try:
-                data = json.loads(message)
-            except Exception:
-                continue
-            print("[ws-in]", data.get("type"), flush=True)  # DEBUG
-            cb = self.handlers.get(data.get("type"))
-            if not cb:
-                continue
-            try:
-                result = cb(data)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception as e:
-                # Don't crash the loop on handler exceptions; just log
-                print("signaling handler error:", e, flush=True)
+        try:
+            async for message in self.ws:
+                try:
+                    data = json.loads(message)
+                except Exception:
+                    continue
+                t = data.get("type")
+                cb = self.handlers.get(t)
+                if cb:
+                    await cb(data) if asyncio.iscoroutinefunction(cb) else cb(data)
+        except asyncio.CancelledError:
+            # don’t propagate; host/viewer will decide when to exit
+            return
+        except Exception as e:
+            print("[ws-loop] error:", e, flush=True)
+            return
 

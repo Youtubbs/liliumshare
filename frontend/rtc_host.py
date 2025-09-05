@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse, asyncio, json, os, sys
 from typing import Optional
 
@@ -10,6 +11,37 @@ except Exception as e:
     raise
 
 from signaling import Signaling
+
+# --- centralized network config loader ---
+import json as _json
+from pathlib import Path as _Path
+
+def _load_netcfg():
+    env_path = os.getenv("LILIUM_NETCFG")
+    if env_path:
+        p = _Path(env_path)
+    else:
+        here = _Path(__file__).resolve()
+        candidates = [
+            here.parent / "backend" / "network_config.json",
+            here.parent.parent / "backend" / "network_config.json",
+            here.parents[2] / "backend" / "network_config.json",
+        ]
+        p = next((c for c in candidates if c.exists()), None)
+    data = {}
+    if p and p.exists():
+        try:
+            data = _json.loads(p.read_text())
+        except Exception:
+            data = {}
+    be = data.get("backend", {})
+    http_base = be.get("http_base", "http://localhost:18080")
+    ws_base   = be.get("ws_base",   http_base.replace("http://","ws://").replace("https://","wss://").rstrip("/") + "/ws")
+    return {"http_base": http_base, "ws_base": ws_base}
+
+_NETCFG = _load_netcfg()
+_DEFAULT_WS_BASE = _NETCFG["ws_base"]
+# ------------------------------------------
 
 KEYS_PATH = os.path.expanduser("~/.liliumshare/keys.json")
 
@@ -102,16 +134,24 @@ async def run_host(ws_url: str, pubkey_override: Optional[str]):
 
     try:
         await sig.loop()
+    except asyncio.CancelledError:
+        print("[host] signaling cancelled; staying alive until process exit", flush=True)
+        # Keep process alive so existing PeerConnection can keep sending frames.
+        while True:
+            await asyncio.sleep(1)
+    except Exception as e:
+        print("[host] signaling loop error:", e, flush=True)
+        while True:
+            await asyncio.sleep(1)
     finally:
         await pc.close()
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ws", default="ws://localhost:8081/ws")
+    ap.add_argument("--ws", default=_DEFAULT_WS_BASE)
     ap.add_argument("--pubkey", help="override host pubkey (base64)")
     return ap.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
     asyncio.run(run_host(args.ws, args.pubkey))
-    

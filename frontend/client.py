@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse
 import asyncio
 import json
@@ -13,10 +14,43 @@ from urllib.request import urlopen
 from rtc_host import run_host as host_run
 from rtc_viewer import run_viewer as viewer_run  # NOTE: viewer_run is synchronous
 
+# --- centralized network config loader ---
+import os, json
+from pathlib import Path
+
+def _load_netcfg():
+    # Allow override via env, otherwise use repo_root/backend/network_config.json
+    env_path = os.getenv("LILIUM_NETCFG")
+    if env_path:
+        p = Path(env_path)
+    else:
+        # file location → repo root → backend/network_config.json
+        here = Path(__file__).resolve()
+        repo_root = here.parents[1]  # repo/<frontend|scripts>/<thisfile> → repo
+        p = repo_root / "backend" / "network_config.json"
+    try:
+        data = json.loads(p.read_text())
+    except Exception:
+        data = {}
+    # sane defaults
+    be = data.get("backend", {})
+    http_base = be.get("http_base", "http://localhost:18080")
+    ws_base = be.get("ws_base", http_base.replace("http://", "ws://").replace("https://","wss://").rstrip("/") + "/ws")
+    return {"http_base": http_base, "ws_base": ws_base}
+
+NETCFG = _load_netcfg()
+DEFAULT_HTTP_BASE = NETCFG["http_base"]
+DEFAULT_WS_BASE   = NETCFG["ws_base"]
+# ------------------------------------------
+
 def http_base_from_ws(ws_url: str) -> str:
-    u = urlparse(ws_url)
-    scheme = "https" if u.scheme == "wss" else "http"
-    return urlunparse((scheme, u.netloc, "", "", "", ""))
+    # honor explicit ws_url if passed; otherwise use DEFAULTs from config
+    if ws_url:
+        from urllib.parse import urlparse, urlunparse
+        u = urlparse(ws_url)
+        scheme = "https" if u.scheme == "wss" else "http"
+        return urlunparse((scheme, u.netloc, "", "", "", ""))
+    return DEFAULT_HTTP_BASE
 
 def fetch_pubkey_by_nick(ws_url: str, nickname: str) -> str:
     base = http_base_from_ws(ws_url)
@@ -29,7 +63,7 @@ def main():
     ap = argparse.ArgumentParser(description="LiliumShare client")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    default_ws = "ws://localhost:8081/ws"
+    default_ws = DEFAULT_WS_BASE
 
     aph = sub.add_parser("host", help="Run as host (share your screen)")
     aph.add_argument("--ws", default=default_ws, help="Signaling WS URL")
@@ -69,4 +103,11 @@ def main():
         return
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
+    except Exception as e:
+        # print a concise error and exit nonzero
+        sys.stderr.write(f"{e}\n")
+        sys.exit(1)

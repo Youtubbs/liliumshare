@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse, json, os, sys, pathlib, threading, queue, asyncio, time
 import numpy as np
 import cv2  # for JPEG decode
@@ -8,10 +9,44 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
 from aiortc.contrib.media import MediaBlackhole
 from signaling import Signaling
 
+# --- centralized network config loader ---
+import json as _json
+from pathlib import Path as _Path
+
+def _load_netcfg():
+    env_path = os.getenv("LILIUM_NETCFG")
+    if env_path:
+        p = _Path(env_path)
+    else:
+        here = _Path(__file__).resolve()
+        candidates = [
+            here.parent / "backend" / "network_config.json",
+            here.parent.parent / "backend" / "network_config.json",
+            here.parents[2] / "backend" / "network_config.json",
+        ]
+        p = next((c for c in candidates if c.exists()), None)
+    data = {}
+    if p and p.exists():
+        try:
+            data = _json.loads(p.read_text())
+        except Exception:
+            data = {}
+    be = data.get("backend", {})
+    http_base = be.get("http_base", "http://localhost:18080")
+    ws_base   = be.get("ws_base",   http_base.replace("http://","ws://").replace("https://","wss://").rstrip("/") + "/ws")
+    return {"http_base": http_base, "ws_base": ws_base}
+
+_NETCFG = _load_netcfg()
+_DEFAULT_HTTP_BASE = _NETCFG["http_base"]
+_DEFAULT_WS_BASE   = _NETCFG["ws_base"]
+# ------------------------------------------
+
 # display uses pygame/SDL (reliable on Wayland)
 KEYS_PATH = pathlib.Path.home() / ".liliumshare" / "keys.json"
 
 def http_base_from_ws(ws_url: str) -> str:
+    if not ws_url:
+        return _DEFAULT_HTTP_BASE
     u = urlparse(ws_url)
     scheme = "https" if u.scheme == "wss" else "http"
     return urlunparse((scheme, u.netloc, "", "", "", ""))
@@ -290,7 +325,7 @@ def run_viewer(host_pubkey: str, ws_url: str, pubkey_cli: Optional[str]):
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", required=True, help="Host public key")
-    ap.add_argument("--ws", default="ws://localhost:8081/ws")
+    ap.add_argument("--ws", default=_DEFAULT_WS_BASE)
     ap.add_argument("--pubkey", help="Override identity (base64 RSA public key)")
     return ap.parse_args()
 
