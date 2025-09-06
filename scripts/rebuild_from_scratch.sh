@@ -151,25 +151,38 @@ until curl -fsS "$HTTP_BASE/health" >/dev/null 2>&1; do
 done
 echo "Backend healthy."
 
+# ---- Python venv (./venv) and requirements ----
+echo "Setting up Python venv in ./venv …"
+if [[ ! -d "venv" ]]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    die "python3 is required but not found in PATH."
+  fi
+  # Create the venv
+  python3 -m venv venv || {
+    echo "python3 -m venv failed. On Debian/Ubuntu you may need: sudo apt install -y python3-venv" >&2
+    exit 1
+  }
+fi
+
+VENV_PY="$ROOT/venv/bin/python"
+VENV_PIP="$ROOT/venv/bin/pip"
+
+# Make sure pip exists inside venv
+"$VENV_PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+if ! "$VENV_PIP" --version >/dev/null 2>&1; then
+  echo "Installing pip into venv…"
+  "$VENV_PY" -m ensurepip --upgrade || true
+fi
+
+echo "Upgrading pip and installing frontend requirements…"
+"$VENV_PY" -m pip install --upgrade pip
+"$VENV_PY" -m pip install -r frontend/requirements.txt
+
 # ---- optional test bootstrap (A,B,C) ----
 if [[ "$DO_TEST" -eq 1 ]]; then
   echo "Bootstrapping triple users (A,B,C)…"
-
-  # heredoc must close BEFORE 'then'
-  if ! python3 - 2>/dev/null <<'PY'
-import importlib.util, sys
-missing = [m for m in ("requests","cryptography") if importlib.util.find_spec(m) is None]
-sys.exit(0 if not missing else 1)
-PY
-  then
-    echo "Installing Python deps into a fresh venv (requests, cryptography)…"
-    bash scripts/venv_install_python_packages.sh
-    # shellcheck disable=SC1091
-    source venv/bin/activate
-  fi
-
   export LILIUM_NETCFG
-  python3 scripts/bootstrap_local_triple_user.py --base "$HTTP_BASE" || die "Triple bootstrap failed."
+  "$VENV_PY" scripts/bootstrap_local_triple_user.py --base "$HTTP_BASE" || die "Triple bootstrap failed."
 
   echo
   echo "Verifying friends/list endpoints…"
@@ -180,4 +193,5 @@ echo
 echo "Rebuild complete."
 echo "Backend: $HTTP_BASE"
 echo "WS:      $WS_BASE"
+echo
 echo "Type in 'source venv/bin/activate' before running any python scripts."

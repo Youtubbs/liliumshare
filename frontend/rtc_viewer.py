@@ -147,6 +147,7 @@ async def _viewer_async(app: ViewerApp, host_pubkey: str, ws_url: str, viewer_pu
             return
         if track.kind == "video":
             async def pump():
+                print("[viewer-async] video pump started", flush=True)   # <— add this
                 frames = 0
                 try:
                     while not app.stop.is_set():
