@@ -179,7 +179,7 @@ app.all('/api/friends/connkey', async (req, res) => {
   res.json(r.rows[0]);
 });
 
-// list friends and requests for "me" (includes nickname for "other")
+// list friends and requests for "me"
 app.get('/api/friends/list', async (req, res) => {
   const me = (req.query.me || '').toString();
   if (!me) return res.status(400).json({ error: 'me required' });
@@ -209,7 +209,7 @@ app.get('/api/friends/list', async (req, res) => {
       [me]
     );
 
-    // accepted both directions → collapse to unique "other"
+    // accepted both directions -> collapse to unique "other"
     const acc = await pool.query(
       `SELECT f.host_pubkey, f.friend_pubkey, f.permissions, f.created_at
          FROM friendships f
@@ -245,6 +245,7 @@ app.get('/api/friends/list', async (req, res) => {
     res.status(500).json({ error: 'db error' });
   }
 });
+
 // ---- WS signaling ----
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -289,13 +290,14 @@ wss.on('connection', (ws, req) => {
           'SELECT status, permissions FROM friendships WHERE host_pubkey=$1 AND friend_pubkey=$2',
           [host, viewer]
         );
-        if (r.rowCount === 0) { console.log('[join-denied] not-friends (no row)'); send(ws, { type:'join-denied', reason:'not-friends' }); return; }
-        const row = r.rows[0];
-        if (row.status !== 'accepted') { console.log('[join-denied] not-friends (status=', row.status, ')'); send(ws, { type:'join-denied', reason:'not-friends' }); return; }
-        const perms = row.permissions || {};
+        if (r.rowCount === 0 || r.rows[0].status !== 'accepted') {
+          send(ws, { type:'join-denied', reason:'not-friends' }); return;
+        }
+        const perms = r.rows[0].permissions || {};
         const hostWS = clients.get(host);
-        if (!hostWS) { console.log('[join-denied] host-offline'); send(ws, { type:'join-denied', reason:'host-offline' }); return; }
-        console.log('[incoming-join] notify host, perms=', perms);
+        if (!hostWS) {
+          send(ws, { type:'join-denied', reason:'host-offline' }); return;
+        }
         send(hostWS, { type:'incoming-join', viewer, permissions: perms });
       } catch (e) {
         console.error('[join-request ERROR]', e);

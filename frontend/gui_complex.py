@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, time, pathlib, subprocess, threading
+import os, sys, json, time, pathlib, subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import requests
@@ -16,7 +16,7 @@ def _load_netcfg():
     else:
         # file location → repo root → backend/network_config.json
         here = Path(__file__).resolve()
-        repo_root = here.parents[1]  # repo/<frontend|scripts>/<thisfile> → repo
+        repo_root = here.parents[1]
         p = repo_root / "backend" / "network_config.json"
     try:
         data = json.loads(p.read_text())
@@ -25,7 +25,7 @@ def _load_netcfg():
     # sane defaults
     be = data.get("backend", {})
     http_base = be.get("http_base", "http://localhost:18080")
-    ws_base = be.get("ws_base", http_base.replace("http://", "ws://").replace("https://","wss://").rstrip("/") + "/ws")
+    ws_base = be.get("ws_base", http_base.replace("http://","ws://").replace("https://","wss://").rstrip("/") + "/ws")
     return {"http_base": http_base, "ws_base": ws_base}
 
 NETCFG = _load_netcfg()
@@ -153,15 +153,21 @@ class App(tk.Tk):
             self._log(f"list error: {e}"); return
         for grp in (self.grp_in, self.grp_out, self.grp_acc):
             for c in self.tree.get_children(grp): self.tree.delete(c)
+
         for row in d.get("incoming", []):
-            iid = self.tree.insert(self.grp_in, "end", text=row.get("nickname") or short(row["viewer_pubkey"]), open=False)
-            self.tree.item(iid, values=(row.get("nickname") or "", row["viewer_pubkey"]))
+            nick = row.get("nickname") or short(row["other"])
+            iid = self.tree.insert(self.grp_in, "end", text=nick, open=False)
+            self.tree.item(iid, values=(nick, row["other"]))
+
         for row in d.get("outgoing", []):
-            iid = self.tree.insert(self.grp_out, "end", text=row.get("nickname") or short(row["host_pubkey"]), open=False)
-            self.tree.item(iid, values=(row.get("nickname") or "", row["host_pubkey"]))
-        for row in d.get("accepted", []):
-            iid = self.tree.insert(self.grp_acc, "end", text=row.get("nickname") or short(row["pubkey"]), open=False)
-            self.tree.item(iid, values=(row.get("nickname") or "", row["pubkey"]))
+            nick = row.get("nickname") or short(row["other"])
+            iid = self.tree.insert(self.grp_out, "end", text=nick, open=False)
+            self.tree.item(iid, values=(nick, row["other"]))
+
+        for row in d.get("friends", []):
+            nick = row.get("nickname") or short(row["other"])
+            iid = self.tree.insert(self.grp_acc, "end", text=nick, open=False)
+            self.tree.item(iid, values=(nick, row["other"]))
 
     def _sel(self, _):
         sel = self.tree.selection()
@@ -230,10 +236,9 @@ class App(tk.Tk):
             devs = sd.query_devices()
             items = ["Default"] + [f"{i}: {d['name']}" for i,d in enumerate(devs)]
             if self.audio_choice.get() not in items: self.audio_choice.set(items[0])
-            self.audio_list = items; self.cmb_audio = getattr(self, "cmb_audio", None)
-            if self.cmb_audio: self.cmb_audio["values"] = items
+            self.cmb_audio["values"] = items
         except Exception:
-            self.audio_list = ["Default"]
+            self.cmb_audio["values"] = ["Default"]; self.audio_choice.set("Default")
 
     def _refresh_video(self):
         items = ["Portal (Screen)", "Synthetic"]
@@ -244,23 +249,12 @@ class App(tk.Tk):
                 if cap and cap.isOpened(): items.append(f"Camera {idx}")
                 if cap: cap.release()
         except Exception: pass
-        self.video_list = items
-        self.cmb_video = getattr(self, "cmb_video", None)
-        if self.cmb_video: self.cmb_video["values"] = items
+        self.cmb_video["values"] = items
         if self.video_choice.get() not in items: self.video_choice.set(items[0])
 
     def _env_devices(self):
         env = os.environ.copy()
         env["HOME"] = self.keys_home.get()
-        if self.audio_choice.get() != "Default" and ":" in self.audio_choice.get():
-            env["LILIUM_AUDIO_DEVICE"] = self.audio_choice.get().split(":")[0]
-        if self.video_choice.get().startswith("Portal"):
-            env["LILIUM_VIDEO_MODE"] = "portal"
-        elif self.video_choice.get().startswith("Synthetic"):
-            env["LILIUM_VIDEO_MODE"] = "synthetic"
-        else:
-            env["LILIUM_VIDEO_MODE"] = "camera"
-            env["LILIUM_CAMERA_INDEX"] = self.video_choice.get().split()[-1]
         return env
 
     def _start_host(self):

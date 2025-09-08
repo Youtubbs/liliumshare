@@ -16,7 +16,7 @@ def _load_netcfg():
     else:
         # file location → repo root → backend/network_config.json
         here = Path(__file__).resolve()
-        repo_root = here.parents[1]  # repo/<frontend|scripts>/<thisfile> → repo
+        repo_root = here.parents[1]
         p = repo_root / "backend" / "network_config.json"
     try:
         data = json.loads(p.read_text())
@@ -25,7 +25,7 @@ def _load_netcfg():
     # sane defaults
     be = data.get("backend", {})
     http_base = be.get("http_base", "http://localhost:18080")
-    ws_base = be.get("ws_base", http_base.replace("http://", "ws://").replace("https://","wss://").rstrip("/") + "/ws")
+    ws_base = be.get("ws_base", http_base.replace("http://","ws://").replace("https://","wss://").rstrip("/") + "/ws")
     return {"http_base": http_base, "ws_base": ws_base}
 
 NETCFG = _load_netcfg()
@@ -64,6 +64,9 @@ class App(tk.Tk):
         self.video_choice = tk.StringVar(value="Portal (Screen)")
         self.status_map = {}   # pubkey -> {'state': 'incoming|outgoing|accepted', 'blink':bool, 'item':iid}
         self._blink_phase = True
+
+        self.add_nick = tk.StringVar(value="")
+        self.add_pub  = tk.StringVar(value="")
 
         self._build_ui()
         self._start_poll()
@@ -110,6 +113,20 @@ class App(tk.Tk):
         self.tree.tag_configure("outgoing2", background="#70BEFF")
         self.tree.tag_configure("accepted", background="")
 
+        addf = ttk.LabelFrame(right, text="Add Friend")
+        addf.pack(fill="x", padx=6, pady=(6,2))
+        ttk.Label(addf, text="Nickname (optional):").grid(row=0, column=0, sticky="e", padx=(4,2), pady=4)
+        e_nick = ttk.Entry(addf, textvariable=self.add_nick)
+        e_nick.grid(row=0, column=1, sticky="we", padx=4, pady=4)
+
+        ttk.Label(addf, text="Friend's Public ID:").grid(row=1, column=0, sticky="e", padx=(4,2), pady=4)
+        e_pub = ttk.Entry(addf, textvariable=self.add_pub)
+        e_pub.grid(row=1, column=1, sticky="we", padx=4, pady=4)
+        ttk.Button(addf, text="Send Friend Request", command=self._send_request).grid(row=0, column=2, rowspan=2, sticky="nsw", padx=6, pady=4)
+        addf.grid_columnconfigure(1, weight=1)
+        e_nick.bind("<Return>", lambda _e: self._send_request())
+        e_pub.bind("<Return>",  lambda _e: self._send_request())
+
         info = ttk.LabelFrame(right, text="Friend")
         info.pack(fill="x", padx=6, pady=6)
         self.sel_nick = tk.StringVar(value="")
@@ -137,18 +154,15 @@ class App(tk.Tk):
         ttk.Button(act, text="Share my screen (host)", command=self._start_host).pack(side="left", padx=8)
         ttk.Button(act, text="Settings…", command=self._open_settings).pack(side="left", padx=8)
 
-        self._refresh_audio()
-        self._refresh_video()
-        self._reload_lists()
+        self._refresh_audio(); self._refresh_video(); self._reload_lists()
 
     # ---------- helpers ----------
     def _apply_base(self):
-        self.ws.set(ws_from_http(self.base.get()))
+        self.ws.set(self.base.get().rstrip("/").replace("http://", "ws://").replace("https://","wss://") + "/ws")
 
     def _pick_home(self):
-        path = filedialog.askdirectory(initialdir=self.keys_home.get() or str(pathlib.Path.home()))
-        if path:
-            self.keys_home.set(path)
+        p = filedialog.askdirectory(initialdir=self.keys_home.get() or str(pathlib.Path.home()))
+        if p: self.keys_home.set(p)
 
     def _load_my_keys(self):
         try:
@@ -167,8 +181,7 @@ class App(tk.Tk):
     # ---------- list / blinking ----------
     def _reload_lists(self):
         me = self.me_pub.get().strip()
-        if not me:
-            return
+        if not me: return
         try:
             r = self._api("GET", "/api/friends/list", params={"me": me})
             r.raise_for_status()
@@ -207,13 +220,9 @@ class App(tk.Tk):
         self._blink_phase = not self._blink_phase
         for pk, st in self.status_map.items():
             if not st["blink"]: continue
-            tag = None
-            if st["state"] == "incoming":
-                tag = "incoming1" if self._blink_phase else "incoming2"
-            elif st["state"] == "outgoing":
-                tag = "outgoing1" if self._blink_phase else "outgoing2"
-            if tag:
-                self.tree.item(st["item"], tags=(tag,))
+            tag = "incoming1" if self._blink_phase else "incoming2" if st["state"]=="incoming" else \
+                  "outgoing1" if self._blink_phase else "outgoing2"
+            self.tree.item(st["item"], tags=(tag,))
         self.after(600, self._blink_tick)
 
     def _start_poll(self):
@@ -232,19 +241,15 @@ class App(tk.Tk):
 
     def _on_select(self, _):
         pk = self._selected_pk_from_click()
-        if not pk:
-            return
-        self.sel_pub.set(pk)
-        self.sel_nick.set("")
+        if not pk: return
+        self.sel_pub.set(pk); self.sel_nick.set("")
 
     def _on_right_click(self, ev):
         iid = self.tree.identify_row(ev.y)
-        if not iid:
-            return
+        if not iid: return
         self.tree.selection_set(iid)
         pk = self._selected_pk_from_click()
-        if not pk:
-            return
+        if not pk: return
         st = self.status_map.get(pk, {})
         menu = tk.Menu(self, tearoff=0)
         if st.get("state") == "incoming":
@@ -262,12 +267,33 @@ class App(tk.Tk):
         finally:
             menu.grab_release()
 
+    def _send_request(self):
+        me = self.me_pub.get().strip()
+        if not me:
+            messagebox.showerror("Friend Request", "Load your keys first (Load Keys)."); return
+        friend = self.add_pub.get().strip()
+        nick = (self.add_nick.get() or "").strip()
+        if not friend:
+            messagebox.showerror("Friend Request", "Enter your friend's Public ID."); return
+        if friend == me:
+            messagebox.showerror("Friend Request", "You cannot add yourself."); return
+        try:
+            r = self._api("POST", "/api/friends/request",
+                          json={"me": me, "friend": friend, "nickname": nick or None})
+            r.raise_for_status()
+            messagebox.showinfo("Friend Request", "Request sent.")
+            self.add_nick.set(""); self.add_pub.set("")
+            self._reload_lists()
+        except requests.HTTPError as e:
+            try: msg = e.response.text
+            except Exception: msg = str(e)
+            messagebox.showerror("Friend Request", msg)
+        except Exception as e:
+            messagebox.showerror("Friend Request", str(e))
 
-    # ---------- backend ops ----------
     def _accept(self, other):
         me = self.me_pub.get().strip()
-        if not me: 
-            messagebox.showerror("Accept", "Load your keys first."); return
+        if not me: messagebox.showerror("Accept", "Load your keys first."); return
         try:
             r = self._api("POST", "/api/friends/accept", json={"me": me, "friend": other})
             r.raise_for_status()
@@ -279,12 +305,12 @@ class App(tk.Tk):
         # Backend doesn’t expose a real delete yet; do a soft-decline and refresh.
         try:
             self._api("POST", "/api/friends/permissions",
-                    json={"host": self.me_pub.get().strip(), "friend": other, "permissions": {}})
+                      json={"host": self.me_pub.get().strip(), "friend": other, "permissions": {}})
         except Exception:
             pass
         self._reload_lists()
 
-    def _cancel(self, host_pubkey):
+    def _cancel(self, _host_pubkey):
         messagebox.showinfo("Cancel", "No cancel endpoint yet; ignoring outgoing request.")
         self._reload_lists()
 
@@ -294,12 +320,10 @@ class App(tk.Tk):
         try:
             import sounddevice as sd
             devs = sd.query_devices()
-            items = ["Default"]
-            for i, d in enumerate(devs):
-                items.append(f"{i}: {d['name']}")
+            items = ["Default"] + [f"{i}: {d['name']}" for i,d in enumerate(devs)]
             self.cmb_audio["values"] = items
             if self.audio_choice.get() not in items:
-                self.audio_choice.set(items[0] if items else "Default")
+                self.audio_choice.set(items[0])
         except Exception:
             self.cmb_audio["values"] = ["Default"]
             self.audio_choice.set("Default")
@@ -317,7 +341,7 @@ class App(tk.Tk):
             pass
         self.cmb_video["values"] = items
         if self.video_choice.get() not in items:
-            self.video_choice.set(items[0] if items else "Portal (Screen)")
+            self.video_choice.set(items[0])
 
     # ---------- launchers ----------
     def _connect_view(self):
@@ -326,38 +350,12 @@ class App(tk.Tk):
             messagebox.showerror("Connect", "Select a friend first."); return
         env = os.environ.copy()
         env["HOME"] = self.keys_home.get()
-        if self.audio_choice.get() != "Default" and ":" in self.audio_choice.get():
-            env["LILIUM_AUDIO_DEVICE"] = self.audio_choice.get().split(":")[0]
-        vc = self.video_choice.get()
-        if vc.startswith("Portal"):
-            env["LILIUM_VIDEO_MODE"] = "portal"
-        elif vc.startswith("Synthetic"):
-            env["LILIUM_VIDEO_MODE"] = "synthetic"
-        elif vc.startswith("Camera"):
-            env["LILIUM_VIDEO_MODE"] = "camera"
-            env["LILIUM_CAMERA_INDEX"] = vc.split()[-1]
-        try:
-            subprocess.Popen([sys.executable, "frontend/client.py", "view", "--ws", self.ws.get(), "--host", host_pub], env=env)
-        except Exception as e:
-            messagebox.showerror("Connect", str(e))
+        subprocess.Popen([sys.executable, "frontend/client.py", "view", "--ws", self.ws.get(), "--host", host_pub], env=env)
 
     def _start_host(self):
         env = os.environ.copy()
         env["HOME"] = self.keys_home.get()
-        if self.audio_choice.get() != "Default" and ":" in self.audio_choice.get():
-            env["LILIUM_AUDIO_DEVICE"] = self.audio_choice.get().split(":")[0]
-        vc = self.video_choice.get()
-        if vc.startswith("Portal"):
-            env["LILIUM_VIDEO_MODE"] = "portal"
-        elif vc.startswith("Synthetic"):
-            env["LILIUM_VIDEO_MODE"] = "synthetic"
-        elif vc.startswith("Camera"):
-            env["LILIUM_VIDEO_MODE"] = "camera"
-            env["LILIUM_CAMERA_INDEX"] = vc.split()[-1]
-        try:
-            subprocess.Popen([sys.executable, "frontend/client.py", "host", "--ws", self.ws.get()], env=env)
-        except Exception as e:
-            messagebox.showerror("Host", str(e))
+        subprocess.Popen([sys.executable, "frontend/client.py", "host", "--ws", self.ws.get()], env=env)
 
     # ---------- settings popup ----------
     def _open_settings(self):

@@ -19,8 +19,25 @@ try {
   NETCFG = {};
 }
 
-const dbUrl = process.env.DATABASE_URL || (NETCFG.database && NETCFG.database.url);
-const pool = new Pool({ connectionString: dbUrl });
+function fromDbPartsEnv() {
+  const host = process.env.DB_HOST;
+  const port = process.env.DB_PORT;
+  const user = process.env.DB_USER;
+  const pass = process.env.DB_PASSWORD;
+  const name = process.env.DB_NAME;
+  if (host && port && user && pass && name) {
+    const enc = encodeURIComponent;
+    return `postgres://${enc(user)}:${enc(pass)}@${host}:${port}/${enc(name)}`;
+  }
+  return null;
+}
+
+const dbUrl =
+  process.env.DATABASE_URL ||
+  (NETCFG.database && NETCFG.database.url) ||
+  fromDbPartsEnv();
+
+const pool = new Pool(dbUrl ? { connectionString: dbUrl } : undefined);
 
 const sql = `
 CREATE TABLE IF NOT EXISTS users (
@@ -32,7 +49,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS friendships (
   host_pubkey   TEXT NOT NULL,
   friend_pubkey TEXT NOT NULL,
-  status        TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'accepted'
+  status        TEXT NOT NULL DEFAULT 'pending',
   permissions   JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at    TIMESTAMP DEFAULT now(),
   PRIMARY KEY (host_pubkey, friend_pubkey),

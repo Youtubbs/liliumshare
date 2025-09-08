@@ -1,0 +1,32 @@
+{
+  "db": {
+    "ip": "192.168.56.10",
+    "port": 5432,
+    "container_port": 5432,
+    "user": "lilium",
+    "password": "lilium",
+    "database": "liliumshare"
+  },
+  "api": {
+    "ip": "192.168.56.20",
+    "port": 18080,
+    "container_port": 18080
+  },
+  "edge": {
+    "ip": "192.168.56.30",
+    "port": 18080
+  },
+  "host": {
+    "forward_http": 18080,
+    "forward_ip": "127.0.0.1"
+  },
+  "backend": {
+    "http_base": "http://192.168.56.30:18080",
+    "ws_base": "ws://192.168.56.30:18080/ws",
+    "host_http_port": 18080,
+    "container_http_port": 18080
+  },
+  "database": {
+    "url": "postgres://lilium:lilium@192.168.56.10:5432/liliumshare"
+  }
+}

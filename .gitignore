@@ -7,6 +7,7 @@
 _userA_home/
 _userB_home/
 _userC_home/
+.vagrant/
 
 ################################################################################
 # NODE & JAVASCRIPT
