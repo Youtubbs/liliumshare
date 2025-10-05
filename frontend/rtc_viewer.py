@@ -8,8 +8,7 @@ from urllib.request import urlopen
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
 from aiortc.contrib.media import MediaBlackhole
 from signaling import Signaling
-
-# --- centralized network config loader ---
+from messaging import MessagingSession, ChatWindow
 import json as _json
 from pathlib import Path as _Path
 
@@ -123,6 +122,73 @@ async def _viewer_async(app: ViewerApp, host_pubkey: str, ws_url: str, viewer_pu
     audio_sink = MediaBlackhole()
     audio_started = False
 
+    chat = {"session": None, "ui": None}
+
+    @pc.on("datachannel")
+    def on_datachannel(dc):
+        print(f"[viewer-async] datachannel opened:", dc.label, flush=True)
+        if dc.label == "video-fallback":
+            counter = {"n": 0}
+            def _on_msg(msg):
+                if isinstance(msg, (bytes, bytearray)):
+                    try:
+                        arr = np.frombuffer(msg, dtype=np.uint8)
+                        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            app.push(img)
+                            counter["n"] += 1
+                            if counter["n"] % 60 == 0:
+                                print(f"[viewer-async] fallback frames: {counter['n']}", flush=True)
+                    except Exception as e:
+                        print("[viewer-async] fallback decode error:", e, flush=True)
+            dc.on("message", _on_msg)
+
+        if dc.label == "secure-msg":
+            # transport: DC string messages
+            def _send_raw(s: str):
+                try:
+                    dc.send(s)
+                except Exception as e:
+                    print("[viewer/msg] send error:", e, flush=True)
+
+            def _on_plaintext(txt: str):
+                # Show as incoming (left) on viewer side
+                if chat["ui"]:
+                    chat["ui"].post_incoming(txt)
+                print(f"[chat] Host: {txt}", flush=True)
+
+            sess = MessagingSession(
+                role="viewer",
+                me_pubkey=viewer_pubkey,
+                other_pubkey=host_pubkey,
+                ws_url=ws_url,
+                send_raw=_send_raw,
+                on_plaintext=_on_plaintext
+            )
+            chat["session"] = sess
+
+            def on_open():
+                print("[viewer/msg] dc open; waiting for host hello", flush=True)
+                ui = ChatWindow("LiliumShare — Chat (Viewer)",
+                                send_fn=lambda t: False,  # replaced below
+                                on_close=lambda: sess.close())
+                # wire send now (so right-side bubbles appear only on success)
+                def _send_text(t: str) -> bool:
+                    ok = sess.send_text(t)
+                    if ok:
+                        ui.post_outgoing(t)
+                    return ok
+                ui._send_fn = _send_text
+                chat["ui"] = ui
+
+            def on_message(evt):
+                data = evt.data if hasattr(evt, "data") else evt
+                if chat["session"]:
+                    chat["session"].on_json(data)
+
+            dc.on("open", on_open)
+            dc.on("message", on_message)
+
     @pc.on("icecandidate")
     def on_ice(candidate):
         if candidate is None:
@@ -147,7 +213,7 @@ async def _viewer_async(app: ViewerApp, host_pubkey: str, ws_url: str, viewer_pu
             return
         if track.kind == "video":
             async def pump():
-                print("[viewer-async] video pump started", flush=True)   # <— add this
+                print("[viewer-async] video pump started", flush=True)
                 frames = 0
                 try:
                     while not app.stop.is_set():
@@ -161,25 +227,6 @@ async def _viewer_async(app: ViewerApp, host_pubkey: str, ws_url: str, viewer_pu
                     if not app.stop.is_set():
                         print("[viewer-async] pump error:", e, flush=True)
             asyncio.create_task(pump())
-
-    @pc.on("datachannel")
-    def on_datachannel(dc):
-        print(f"[viewer-async] datachannel opened:", dc.label, flush=True)
-        if dc.label == "video-fallback":
-            counter = {"n": 0}
-            def _on_msg(msg):
-                if isinstance(msg, (bytes, bytearray)):
-                    try:
-                        arr = np.frombuffer(msg, dtype=np.uint8)
-                        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # BGR
-                        if img is not None:
-                            app.push(img)
-                            counter["n"] += 1
-                            if counter["n"] % 60 == 0:
-                                print(f"[viewer-async] fallback frames: {counter['n']}", flush=True)
-                    except Exception as e:
-                        print("[viewer-async] fallback decode error:", e, flush=True)
-            dc.on("message", _on_msg)
 
     async def on_message(msg):
         t = msg.get("type")
@@ -223,6 +270,11 @@ async def _viewer_async(app: ViewerApp, host_pubkey: str, ws_url: str, viewer_pu
             pass
         try:
             await sig.ws.close()
+        except:
+            pass
+        try:
+            if chat["session"]:
+                chat["session"].close()
         except:
             pass
 
@@ -280,7 +332,7 @@ def _pygame_gui_loop(app: ViewerApp):
                 frame = app.frames.get_nowait()
                 rgb = frame[:, :, ::-1]
                 h, w, _ = rgb.shape
-                import pygame  # local import ok
+                import pygame
                 surf = pygame.image.frombuffer(rgb.tobytes(), (w, h), "RGB")
                 last_surface = surf
             except queue.Empty:

@@ -125,10 +125,6 @@ docs/_build/
 # PERSONAL & USER DATA
 ################################################################################
 
-# User-specific directories
-_userA_home/
-_userB_home/
-
 # Local environment configs
 .env
 .env.*
@@ -251,7 +247,6 @@ private/
 ################################################################################
 
 # Don't commit keys or secrets
-keys.py
 *.key
 *.pem
 *.crt

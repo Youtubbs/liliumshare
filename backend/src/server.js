@@ -270,7 +270,10 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async (raw) => {
     let data; try { data = JSON.parse(raw.toString()); } catch { return; }
 
-    if (['offer', 'answer', 'ice', 'input-permissions'].includes(data.type)) {
+    // relay bucket (keeps server ignorant of content)
+    if (['offer', 'answer', 'ice', 'input-permissions',
+         // chat relay over WS (encrypted end-to-end by clients)
+         'chat-hello', 'chat-ack', 'chat-msg'].includes(data.type)) {
       const to = data.to;
       const target = clients.get(to);
       if (target) {
