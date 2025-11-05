@@ -9,11 +9,11 @@ import base64
 import hmac
 import json
 import os
+import subprocess
 import threading
 from hashlib import sha256
 from typing import Callable, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
-
 import requests
 from nacl.bindings import (
     crypto_aead_xchacha20poly1305_ietf_decrypt,
@@ -21,6 +21,15 @@ from nacl.bindings import (
 )
 from nacl.public import PrivateKey, PublicKey
 from nacl.utils import random as nacl_random
+try:
+    from plyer import notification as _notify
+except Exception:
+    _notify = None
+try:
+    from signaling import Signaling as Signaling
+except Exception:
+    Signaling = None
+
 
 
 # ------------------------- small helpers -------------------------
@@ -30,31 +39,118 @@ def http_base_from_ws(ws_url: str) -> str:
     scheme = "https" if u.scheme == "wss" else "http"
     return urlunparse((scheme, u.netloc, "", "", "", ""))
 
+# AI made this work somehow. However, when I try to change anything it stops working so I suggest leaving it alone. 
+def _try_connkey(http_base: str, host: str, friend: str):
+    """
+    Try a list of legacy/new endpoints (GET then POST) until one works.
+    Returns the conn_key (base64) or raises the last exception.
+    """
+    import requests
+
+    routes = [
+        # new-style first
+        ("GET",  "/api/friends/connkey", {"host": host, "friend": friend}, None),
+        ("POST", "/api/friends/connkey", None, {"host": host, "friend": friend}),
+        # common legacy shapes
+        ("GET",  "/api/connkey",         {"host": host, "friend": friend}, None),
+        ("POST", "/api/connkey",         None, {"host": host, "friend": friend}),
+        # very old: “any direction”
+        ("GET",  "/api/connkey-any",     {"a": host, "b": friend}, None),
+        ("POST", "/api/connkey-any",     None, {"a": host, "b": friend}),
+    ]
+
+    last_err = None
+    for method, path, params, body in routes:
+        url = http_base.rstrip("/") + path
+        try:
+            if method == "GET":
+                r = requests.get(url, params=params, timeout=8)
+            else:
+                r = requests.post(url, json=body, timeout=8)
+            if r.status_code == 404:
+                # fast-fail to next route
+                continue
+            r.raise_for_status()
+            data = r.json()
+            # normalize field names
+            if "conn_key" in data:
+                return data["conn_key"]
+            if "connKey" in data:
+                return data["connKey"]
+            if "key" in data:
+                return data["key"]
+            # if body is e.g. {"ok":true,"conn_key":"..."}
+            for k in ("conn_key", "connKey", "key"):
+                if isinstance(data.get("data"), dict) and k in data["data"]:
+                    return data["data"][k]
+            # no known field, keep trying
+        except Exception as e:
+            last_err = e
+            continue
+    if last_err:
+        raise last_err
+    raise RuntimeError("No conn-key endpoint succeeded")
+
+def _fetch_connkey(http_base: str, host: str, friend: str) -> str:
+    """Fetch existing connkey. Raises HTTPError on non-200 (including 404)."""
+    url = http_base.rstrip("/") + "/api/friends/connkey"
+    r = requests.get(url, params={"host": host, "friend": friend}, timeout=8)
+    if r.status_code == 200:
+        data = r.json()
+        # normalized field
+        if "conn_key" in data:
+            return data["conn_key"]
+        # rarely, servers wrap data
+        if isinstance(data.get("data"), dict) and "conn_key" in data["data"]:
+            return data["data"]["conn_key"]
+        raise RuntimeError("connkey response missing 'conn_key'")
+    r.raise_for_status()  # propagate 404, 5xx, etc.
+
+
+def _generate_connkey(http_base: str, host: str, friend: str) -> str:
+    """Ask backend to create/refresh the (host,friend) connkey. Returns conn_key."""
+    url = http_base.rstrip("/") + "/api/friends/connkey/generate"
+    r = requests.post(url, json={"host": host, "friend": friend}, timeout=8)
+    # When friendship isn’t accepted, backend returns 409
+    if r.status_code == 409:
+        raise RuntimeError("friendship not accepted (409) — accept / upsert friendship first")
+    r.raise_for_status()
+    data = r.json()
+    if "conn_key" in data:
+        return data["conn_key"]
+    # some handlers might put it under data.conn_key
+    if isinstance(data.get("data"), dict) and "conn_key" in data["data"]:
+        return data["data"]["conn_key"]
+    # last resort, allow OK without echoing key (we’ll re-fetch)
+    return None
+
+
+def _ensure_connkey(http_base: str, host: str, friend: str) -> str:
+    """
+    Fetch connkey; if missing, generate it (requires accepted friendship) and fetch again.
+    """
+    try:
+        return _fetch_connkey(http_base, host, friend)
+    except requests.HTTPError as e:
+        # If not found -> create then fetch again
+        if e.response is not None and e.response.status_code == 404:
+            print("[msg/api] connkey missing → generating…", flush=True)
+            _generate_connkey(http_base, host, friend)
+            return _fetch_connkey(http_base, host, friend)
+        raise
+    except Exception:
+        # fall back to legacy scan if anything else fails
+        return _try_connkey(http_base, host, friend)
+
 
 def get_connkey(http_base: str, host_pub: str, friend_pub: str) -> str:
-    """Fetch conn_key for a specific (host, friend) direction."""
-    url = f"{http_base}/api/friends/connkey"
-    params = {"host": host_pub, "friend": friend_pub}
-    print(f"[msg/api] GET {url} params={params}", flush=True)
-    r = requests.get(url, params=params, timeout=8)
-    print(f"[msg/api] -> {r.status_code}", flush=True)
-    r.raise_for_status()
-    d = r.json()
-    print(f"[msg/api] body: {d}", flush=True)
-    return d["conn_key"]  # base64 string
-
-
-def get_connkey_any(http_base: str, a: str, b: str) -> Tuple[str, bool]:
-    """Legacy helper: try (a,b) then (b,a); returns (connkey, flipped)."""
-    print(f"[msg/connkey-any] trying host={a[:10]}… friend={b[:10]}…", flush=True)
-    try:
-        ck = get_connkey(http_base, a, b)
-        return ck, False
-    except Exception as e1:
-        print("[msg/connkey-any] first direction failed:", e1, flush=True)
-        print(f"[msg/connkey-any] trying host={b[:10]}… friend={a[:10]}…", flush=True)
-        ck = get_connkey(http_base, b, a)
-        return ck, True
+    """
+    Public entry: always ensure a (host,friend) key exists and return it.
+    """
+    print(f"[msg/api] connkey for host={host_pub[:10]}… friend={friend_pub[:10]}…", flush=True)
+    ck = _ensure_connkey(http_base, host_pub, friend_pub)
+    print("[msg/api] connkey: OK", flush=True)
+    return ck
 
 
 def hkdf_sha256(ikm: bytes, salt: bytes, info: bytes, out_len: int = 32) -> bytes:
@@ -79,6 +175,23 @@ def b64e(b: bytes) -> str:
 def b64d(s: str) -> bytes:
     return base64.b64decode(s.encode("ascii"))
 
+def system_notify(title: str, message: str):
+    """
+    Best-effort desktop notification:
+      - try plyer (cross-platform)
+      - then Linux 'notify-send'
+      - otherwise no-op
+    """
+    try:
+        from plyer import notification
+        notification.notify(title=title, message=message, timeout=5)
+        return
+    except Exception:
+        pass
+    try:
+        subprocess.Popen(["notify-send", title, message])
+    except Exception:
+        pass
 
 # ------------------------- datachannel session -------------------------
 
@@ -166,6 +279,14 @@ class MessagingSession:
             print("[msg/tx] hello (host)", flush=True)
         except Exception as e:
             print("[msg/tx] hello send error:", e, flush=True)
+            # after catching an exception when fetching connkey:
+            try:
+                # tell the chat window thread if present
+                th = threading.current_thread()
+                if hasattr(th, "set_status"):
+                    th.set_status("Conn-key fetch failed (see console)")
+            except Exception:
+                pass
 
     def _handle_hello(self, msg: dict):
         role = msg.get("role")
@@ -183,6 +304,14 @@ class MessagingSession:
             conn_key = get_connkey(http_base, host, friend)
         except Exception as e:
             print("[msg/connkey] error (hello):", e, flush=True)
+            # after catching an exception when fetching connkey:
+            try:
+                # tell the chat window thread if present
+                th = threading.current_thread()
+                if hasattr(th, "set_status"):
+                    th.set_status("Conn-key fetch failed (see console)")
+            except Exception:
+                pass
             return
 
         expect = hmac.new(b64d(conn_key), (role + "|" + epub).encode("utf-8"), sha256).digest()
@@ -221,6 +350,14 @@ class MessagingSession:
             conn_key = get_connkey(http_base, self.me_pub, self.other_pub)
         except Exception as e:
             print("[msg/connkey] error (ack):", e, flush=True)
+            # after catching an exception when fetching connkey:
+            try:
+                # tell the chat window thread if present
+                th = threading.current_thread()
+                if hasattr(th, "set_status"):
+                    th.set_status("Conn-key fetch failed (see console)")
+            except Exception:
+                pass
             return
 
         expect = hmac.new(b64d(conn_key), (role + "|" + epub).encode("utf-8"), sha256).digest()
@@ -284,34 +421,25 @@ class MessagingSession:
 def spawn_chat_window(
     title: str,
     send_fn: Callable[[str], bool],
-    on_close: Optional[Callable[[], None]] = None
+    on_close: Optional[Callable[None]] = None
 ):
     """
-    DM-style chat window:
-      - Status label at top-left
-      - Scrollable message area with colored bubbles:
-          * incoming (left)  = light yellow
-          * outgoing (right) = light blue
-      - Entry box at bottom with Send button
-      - Enter to send; Shift+Enter for newline
-    Exposes thread attributes for networking layer:
-      - thread.add_incoming(text)
-      - thread.add_outgoing(text)
-      - thread.set_status(text)
+    DM-style chat window with selectable transcript and visible gray highlight.
     """
     import tkinter as tk
     from tkinter import ttk
-    import queue
     import threading
+    import platform
+    import queue
 
     # Colors & layout
     COLOR_BG        = "#F4F6F8"
-    COLOR_INCOMING  = "#FFF5C2"  # light yellow
-    COLOR_OUTGOING  = "#D6EBFF"  # light blue
-    COLOR_SYSTEM    = "#EEEEEE"
-    BUBBLE_WRAP     = 420        # px wrap width for text bubbles
+    COLOR_INCOMING  = "#FFF5C2"   # light yellow
+    COLOR_OUTGOING  = "#D6EBFF"   # light blue
+    COLOR_SYSTEM    = "#EEEEEE"   # gray bubble
+    COLOR_SEL_BG    = "#C7C7C7"   # <-- visible gray highlight
+    COLOR_SEL_INACT = "#BEBEBE"
     ROW_PAD_Y       = 6
-    COL_PAD_X       = 8
 
     def _thread():
         root = tk.Tk()
@@ -324,108 +452,130 @@ def spawn_chat_window(
         top = ttk.Frame(root)
         top.pack(fill="x", padx=8, pady=(8, 4))
         status_var = tk.StringVar(value="Connecting…")
-        status_lbl = ttk.Label(top, textvariable=status_var, anchor="w")
-        status_lbl.pack(side="left")
+        ttk.Label(top, textvariable=status_var, anchor="w").pack(side="left")
 
-        # ---- MIDDLE: scrollable message area (Canvas + interior Frame)
-        mid = tk.Frame(root, bg=COLOR_BG)
+        # ---- MIDDLE: transcript (Text + Scrollbar)
+        mid = ttk.Frame(root)
         mid.pack(fill="both", expand=True, padx=8, pady=4)
 
-        canvas = tk.Canvas(mid, highlightthickness=0, bg=COLOR_BG)
-        vbar = ttk.Scrollbar(mid, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vbar.set)
+        transcript = tk.Text(
+            mid,
+            wrap="word",
+            bg=COLOR_BG,
+            relief="flat",
+            cursor="xterm",
+            exportselection=True,              # keep PRIMARY selection here
+            insertwidth=0,                     # hide caret
+            selectbackground=COLOR_SEL_BG,     # gray when focused
+            selectforeground="#000000",
+            inactiveselectbackground=COLOR_SEL_INACT,  # gray when unfocused
+            takefocus=True,
+        )
+        sb = ttk.Scrollbar(mid, orient="vertical", command=transcript.yview)
+        transcript.configure(yscrollcommand=sb.set)
+        transcript.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
 
-        vbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
+        # Fallback + ensure sel wins over bubble tags
+        transcript.tag_configure("sel", background=COLOR_SEL_BG, foreground="#000000")
 
-        # The inner frame that holds bubbles
-        inner = tk.Frame(canvas, bg=COLOR_BG)
-        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        # Bubble-ish tag styles
+        pad_left  = 10
+        pad_right = 10
+        transcript.tag_configure(
+            "incoming",
+            background=COLOR_INCOMING,
+            spacing1=ROW_PAD_Y, spacing3=ROW_PAD_Y,
+            lmargin1=pad_left, lmargin2=pad_left,
+            rmargin=120,
+            justify="left",
+        )
+        transcript.tag_configure(
+            "outgoing",
+            background=COLOR_OUTGOING,
+            spacing1=ROW_PAD_Y, spacing3=ROW_PAD_Y,
+            lmargin1=120, lmargin2=120,
+            rmargin=pad_right,
+            justify="right",
+        )
+        transcript.tag_configure(
+            "system",
+            background=COLOR_SYSTEM,
+            spacing1=ROW_PAD_Y, spacing3=ROW_PAD_Y,
+            lmargin1=pad_left, lmargin2=pad_left,
+            rmargin=pad_right,
+            justify="center",
+        )
+        transcript.tag_configure("mono", font=("Courier", 10))
 
-        def _on_config_inner(_e=None):
-            # Update scrollregion to match inner frame size
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            # Make inner frame width follow canvas width
-            canvas_width = canvas.winfo_width()
-            canvas.itemconfigure(inner_id, width=canvas_width)
+        # ⬅️ critical: make selection visible OVER bubbles
+        transcript.tag_raise("sel")
 
-        def _on_config_canvas(_e=None):
-            _on_config_inner()
+        # Focus on click so active selection color shows
+        transcript.bind("<Button-1>", lambda e: (transcript.focus_set(), None))
 
-        inner.bind("<Configure>", _on_config_inner)
-        canvas.bind("<Configure>", _on_config_canvas)
+        # ---- Read-only behavior (block edits but allow selection/copy)
+        def _block_edit(_e=None):
+            return "break"
 
-        # Mouse-wheel scrolling (Linux/Win/macOS)
-        def _on_mousewheel(event):
-            # Linux uses Button-4/5; Windows/macOS use <MouseWheel>
-            if event.num == 4:
-                canvas.yview_scroll(-3, "units")
-            elif event.num == 5:
-                canvas.yview_scroll(+3, "units")
-            elif event.delta:
-                # On Windows delta is +/-120; on macOS apparently is +/-1 or +/-120
-                step = -1 if event.delta > 0 else +1
-                canvas.yview_scroll(step * 3, "units")
+        for seq in (
+            "<KeyPress>", "<BackSpace>", "<Delete>", "<Return>",
+            "<<Paste>>", "<Control-v>", "<Shift-Insert>",
+            "<Command-v>" if platform.system() == "Darwin" else None,
+        ):
+            if seq:
+                transcript.bind(seq, _block_edit)
 
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)   # Win/macOS
-        canvas.bind_all("<Button-4>", _on_mousewheel)     # Linux up
-        canvas.bind_all("<Button-5>", _on_mousewheel)     # Linux down
+        # Copy / Select All
+        def _do_copy(_e=None):
+            try:
+                sel = transcript.get("sel.first", "sel.last")
+            except tk.TclError:
+                sel = ""
+            if sel:
+                root.clipboard_clear()
+                root.clipboard_append(sel)
+            return "break"
+
+        def _do_select_all(_e=None):
+            transcript.tag_add("sel", "1.0", "end-1c")
+            transcript.see("end")
+            return "break"
+
+        transcript.bind("<Control-c>", _do_copy)
+        transcript.bind("<Control-a>", _do_select_all)
+        if platform.system() == "Darwin":
+            transcript.bind("<Command-c>", _do_copy)
+            transcript.bind("<Command-a>", _do_select_all)
+
+        # Context menu
+        menu = tk.Menu(root, tearoff=0)
+        menu.add_command(label="Copy", command=lambda: _do_copy())
+        menu.add_command(label="Select All", command=lambda: _do_select_all())
+        def _popup(e):
+            try:
+                menu.tk_popup(e.x_root, e.y_root)
+            finally:
+                menu.grab_release()
+        transcript.bind("<Button-3>", _popup)  # Win/Linux
+        transcript.bind("<Button-2>", _popup)  # Some X11 setups
 
         # ---- BOTTOM: entry + Send
         bottom = ttk.Frame(root)
         bottom.pack(fill="x", padx=8, pady=(0, 8))
 
-        entry = tk.Text(bottom, height=3, wrap="word")
+        entry = tk.Text(bottom, height=3, wrap="word", exportselection=False)  # ⬅︎ don't steal selection
         entry.grid(row=0, column=0, sticky="ew")
         send_btn = ttk.Button(bottom, text="Send")
         send_btn.grid(row=0, column=1, padx=(6, 0), sticky="e")
         bottom.columnconfigure(0, weight=1)
-
         entry.focus_set()
 
-        # ---- Utilities for making bubbles
-        def _add_bubble(text: str, side: str):
-            """
-            side: 'left' (incoming) or 'right' (outgoing) or 'system'
-            """
-            row = tk.Frame(inner, bg=COLOR_BG)
-            row.pack(fill="x", pady=(ROW_PAD_Y, ROW_PAD_Y))
-
-            if side == "left":
-                container = tk.Frame(row, bg=COLOR_INCOMING, bd=0, highlightthickness=0)
-                anchor_side = "w"
-                padx = (0, COL_PAD_X)
-            elif side == "right":
-                container = tk.Frame(row, bg=COLOR_OUTGOING, bd=0, highlightthickness=0)
-                anchor_side = "e"
-                padx = (COL_PAD_X, 0)
-            else:
-                container = tk.Frame(row, bg=COLOR_SYSTEM, bd=0, highlightthickness=0)
-                anchor_side = "center"
-                padx = (COL_PAD_X, COL_PAD_X)
-
-            # The bubble label
-            lbl = tk.Label(
-                container,
-                text=text,
-                wraplength=BUBBLE_WRAP,
-                justify="left",
-                bg=container["bg"],
-                padx=10,
-                pady=6,
-            )
-            lbl.pack()
-
-            # Place container on left/right/center
-            if anchor_side == "w":
-                container.pack(side="left", anchor="w", padx=padx)
-            elif anchor_side == "e":
-                container.pack(side="right", anchor="e", padx=padx)
-            else:
-                container.pack(anchor="center", padx=padx)
-
-            # Autoscroll to bottom
-            root.after(10, lambda: canvas.yview_moveto(1.0))
+        # ---- Append helpers
+        def _append(kind: str, text: str):
+            tag = "incoming" if kind == "incoming" else "outgoing" if kind == "outgoing" else "system"
+            transcript.insert("end", text.strip() + "\n", (tag,))
+            transcript.see("end")
 
         # Thread-safe queue for UI updates
         q = queue.Queue()
@@ -435,33 +585,28 @@ def spawn_chat_window(
                 while True:
                     kind, payload = q.get_nowait()
                     if kind == "incoming":
-                        _add_bubble(payload, "left")
+                        _append("incoming", payload)
                     elif kind == "outgoing":
-                        _add_bubble(payload, "right")
+                        _append("outgoing", payload)
                     elif kind == "status":
                         status_var.set(payload)
                     elif kind == "system":
-                        _add_bubble(payload, "system")
+                        _append("system", payload)
             except queue.Empty:
                 pass
             finally:
                 root.after(50, _pump)
 
-        def add_incoming(s: str):
-            q.put(("incoming", s))
-
-        def add_outgoing(s: str):
-            q.put(("outgoing", s))
-
-        def set_status(s: str):
-            q.put(("status", s))
+        def add_incoming(s: str):  q.put(("incoming", s))
+        def add_outgoing(s: str):  q.put(("outgoing", s))
+        def set_status(s: str):    q.put(("status", s))
 
         # Expose methods to networking thread
         def _attach_api():
             th = threading.current_thread()
             setattr(th, "add_incoming", add_incoming)
             setattr(th, "add_outgoing", add_outgoing)
-            setattr(th, "set_status", set_status)
+            setattr(th, "set_status",   set_status)
         root.after(0, _attach_api)
 
         # ---- Sending logic
@@ -502,6 +647,36 @@ def spawn_chat_window(
     th = threading.Thread(target=_thread, daemon=True)
     th.start()
     return th
+
+
+# --- compatibility for older code expecting ChatWindow class ---
+class ChatWindow:
+    """
+    Thin wrapper around spawn_chat_window, exposing:
+      - post_incoming(text)
+      - post_outgoing(text)
+      - set_status(text)
+      - _send_fn(text) -> bool   (set by caller; we call it when sending)
+    """
+    def __init__(self, title: str, send_fn, on_close=None):
+        self._send_fn = send_fn
+        self._th = spawn_chat_window(title, send_fn=self._send_text, on_close=on_close)
+
+    def _send_text(self, text: str) -> bool:
+        try:
+            return bool(self._send_fn(text)) if self._send_fn else False
+        except Exception:
+            return False
+
+    # names expected by rtc_viewer
+    def post_incoming(self, s: str):
+        if hasattr(self._th, "add_incoming"): self._th.add_incoming(s)
+
+    def post_outgoing(self, s: str):
+        if hasattr(self._th, "add_outgoing"): self._th.add_outgoing(s)
+
+    def set_status(self, s: str):
+        if hasattr(self._th, "set_status"): self._th.set_status(s)
 
 try:
     from signaling import Signaling 

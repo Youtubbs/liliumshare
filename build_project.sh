@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the entire Vagrant-based project end-to-end.
+# Build the entire Vagrant-based project with local end-to-end.
 # Usage:
 #   ./build_project.sh
 #   ./build_project.sh --vagrant-up

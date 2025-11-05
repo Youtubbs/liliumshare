@@ -32,6 +32,17 @@ app.use(bodyParser.json({ limit: '2mb' }));
 // health
 app.get('/health', (_, res) => res.json({ ok: true }));
 
+// quick DB ping
+app.get('/db/ping', async (_, res) => {
+  try {
+    const r = await pool.query('SELECT 1 AS ok');
+    res.json({ ok: true, db: r.rows[0].ok === 1 });
+  } catch (e) {
+    console.error('[db/ping ERROR]', e);
+    res.status(500).json({ ok: false, error: 'db' });
+  }
+});
+
 // debug helpers
 app.get('/api/debug/users', async (_, res) => {
   const r = await pool.query('SELECT pubkey, nickname, created_at FROM users ORDER BY created_at DESC');
@@ -59,13 +70,24 @@ app.get('/api/users/by-nickname', async (req, res) => {
 
 // register
 app.post('/api/register', async (req, res) => {
+  const t0 = Date.now();
   const { pubkey, nickname } = req.body || {};
   if (!pubkey) return res.status(400).json({ error: 'pubkey required' });
-  await pool.query(
-    'INSERT INTO users (pubkey, nickname) VALUES ($1,$2) ON CONFLICT (pubkey) DO UPDATE SET nickname=EXCLUDED.nickname',
-    [pubkey, nickname || null]
-  );
-  res.json({ ok: true });
+
+  console.log('[register] start', pubkey?.slice(0,8));
+  try {
+    await pool.query(
+      'INSERT INTO users (pubkey, nickname) VALUES ($1,$2) ON CONFLICT (pubkey) DO UPDATE SET nickname=EXCLUDED.nickname',
+      [pubkey, nickname || null]
+    );
+    const ms = Date.now() - t0;
+    console.log('[register] ok', pubkey?.slice(0,8), `${ms}ms`);
+    res.json({ ok: true });
+  } catch (e) {
+    const ms = Date.now() - t0;
+    console.error('[register ERROR]', e, `${ms}ms`);
+    res.status(500).json({ error: 'db error' });
+  }
 });
 
 // friend request (viewer -> host)

@@ -3,4 +3,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY src ./src
-CMD ["npm", "run", "start"]
+
+# add an entrypoint script
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

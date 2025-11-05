@@ -2,11 +2,13 @@ import os, base64, argparse, json, pathlib, requests
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
-CONFIG_DIR = pathlib.Path.home() / ".liliumshare"
+# respect HOME override (GUI sets this to the chosen directory)
+HOME = pathlib.Path(os.environ.get("HOME", str(pathlib.Path.home())))
+CONFIG_DIR = HOME / ".liliumshare"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 KEYS_FILE = CONFIG_DIR / "keys.json"
 
-# --- centralized network config loader ---
+# --- centralized netcfg loader (unchanged idea) ---
 import json as _json
 from pathlib import Path as _Path
 
@@ -37,7 +39,7 @@ def _load_netcfg():
 
 _NETCFG = _load_netcfg()
 _DEFAULT_HTTP_BASE = _NETCFG["http_base"]
-# ------------------------------------------
+# ---------------------------------------------------
 
 def _b64(x: bytes) -> str:
     return base64.b64encode(x).decode()
@@ -56,23 +58,28 @@ def _der_privkey_bytes(private_key) -> bytes:
         serialization.NoEncryption()
     )
 
-def load_or_create():
-    if KEYS_FILE.exists():
-        with open(KEYS_FILE, "r") as f:
-            return json.load(f)
+def generate_and_write(nickname: str | None = None) -> dict:
     sk = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     data = {
         "private": _b64(_der_privkey_bytes(sk)),
         "public":  _b64(_der_pubkey_bytes(sk)),
-        "nickname": None
+        "nickname": nickname
     }
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(KEYS_FILE, "w") as f:
         json.dump(data, f, indent=2)
     return data
 
-def get_keys():
-    with open(KEYS_FILE, "r") as f:
-        return json.load(f)
+def read_or_create(nickname: str | None = None) -> dict:
+    if KEYS_FILE.exists():
+        with open(KEYS_FILE, "r") as f:
+            data = json.load(f)
+        if nickname is not None and (data.get("nickname") != nickname):
+            data["nickname"] = nickname
+            with open(KEYS_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        return data
+    return generate_and_write(nickname)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -82,23 +89,13 @@ def main():
     ap.add_argument("--backend", default=_DEFAULT_HTTP_BASE)
     args = ap.parse_args()
 
+    # ensure file exists if nickname/register requested
     if args.generate:
-        if KEYS_FILE.exists():
-            print("Keys already exist at", KEYS_FILE)
-        else:
-            data = load_or_create()
-            if args.nickname:
-                data["nickname"] = args.nickname
-                with open(KEYS_FILE, "w") as f:
-                    json.dump(data, f, indent=2)
-            print("Generated. Public key (base64 DER):\n", data["public"])
-            return
+        data = generate_and_write(args.nickname)
+        print("Generated. Public key (base64 DER):\n", data["public"])
+        return
 
-    data = get_keys()
-    if args.nickname:
-        data["nickname"] = args.nickname
-        with open(KEYS_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+    data = read_or_create(args.nickname)
 
     if args.register:
         pub = data["public"]
@@ -107,6 +104,7 @@ def main():
         print("Register status:", r.status_code, r.text)
         return
 
+    # default info
     print("Public key:", data["public"])
     if data.get("nickname"):
         print("Nickname:", data["nickname"])
