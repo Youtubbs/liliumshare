@@ -524,7 +524,6 @@ Adjust in `Vagrantfile` if needed.
 ## Repository layout
 
 ```text
-/home/youtubbs/Documents/COSC349/container_temp/liliumshare
 ├── backend
 │   ├── Dockerfile
 │   ├── entrypoint.sh
@@ -570,4 +569,4 @@ Adjust in `Vagrantfile` if needed.
 
 ## Attribution
 
-This project uses open-source software including VirtualBox, Vagrant, Ubuntu, Docker, PostgreSQL, nginx, Node.js, and Python libraries (packages in `frontend/requirements.txt`). ChatGPT was used to help with package usage, troubleshooting, and documentation. Copilot was used for the same reasons. 
+This project uses open-source software including VirtualBox, Vagrant, Ubuntu, Docker, PostgreSQL, nginx, Node.js, and Python libraries (packages in `frontend/requirements.txt`). ChatGPT was used at times to help with package usage, troubleshooting, programming, and documentation. Copilot was used for the same reasons. 
